@@ -1,0 +1,22 @@
+﻿# Локальный PostgreSQL для разработки.
+# Запуск:  docker compose up -d
+# Остановка: docker compose down  (данные сохраняются в volume)
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: friendship-db
+    environment:
+      POSTGRES_USER: friendship
+      POSTGRES_PASSWORD: friendship
+      POSTGRES_DB: friendship
+    ports:
+      - "5432:5432"          # проброс порта на хост, чтобы приложение видело БД
+    volumes:
+      - friendship_pgdata:/var/lib/postgresql/data   # данные переживают перезапуск
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U friendship"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+volumes:
+  friendship_pgdata:
