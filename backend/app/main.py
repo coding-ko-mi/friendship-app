@@ -12,7 +12,7 @@
 
 from fastapi import FastAPI
 
-from app.api.v1 import auth, profiles, questionnaire
+from app.api.v1 import auth, profiles, questionnaire, discovery
 
 app = FastAPI(
     title="Friendship App — Mini App API",
@@ -25,6 +25,7 @@ app = FastAPI(
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(profiles.router, prefix="/api/v1")
 app.include_router(questionnaire.router, prefix="/api/v1")
+app.include_router(discovery.router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])
