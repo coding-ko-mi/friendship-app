@@ -1,9 +1,11 @@
 """
-Окружение Alembic (async).
+Конфигурация Alembic.
 
-Берёт строку подключения и метаданные моделей из приложения,
-поэтому миграции всегда сверяются с актуальной схемой в коде.
+Версия 2.0: добавлены импорты Profile и Questionnaire.
+Предыдущий env.py импортировал только models из чата «БД + модели».
+Теперь импортируем через app.models — единая точка, видит все таблицы.
 """
+
 import asyncio
 from logging.config import fileConfig
 
@@ -13,38 +15,39 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
+# Подключение к БД и настройки
 from app.config import DATABASE_URL
-from app.models import Base  # импорт регистрирует все таблицы в Base.metadata
+from app.models.base import Base
 
-# Объект конфигурации Alembic (доступ к значениям из alembic.ini).
+# Импортируем ВСЕ модели через единую точку входа.
+# app.models.__init__ регистрирует их все в Base.metadata.
+import app.models  # noqa: F401
+
 config = context.config
 
-# Подставляем строку подключения из приложения (а не из alembic.ini).
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
-
-# Настройка логирования из alembic.ini.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Метаданные, по которым autogenerate сравнивает код и БД.
 target_metadata = Base.metadata
+
+# Подставляем DATABASE_URL из app.config (не из alembic.ini)
+config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 
 def run_migrations_offline() -> None:
-    """Режим offline: генерация SQL без подключения к БД."""
+    """Режим offline: генерирует SQL без подключения к БД."""
+    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        compare_type=True,  # отслеживать изменения типов столбцов
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    """Запуск миграций на установленном соединении."""
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
@@ -54,12 +57,9 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
-async def run_migrations_online() -> None:
-    """Режим online: подключаемся к БД async-движком и применяем миграции."""
-    configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = DATABASE_URL
+async def run_async_migrations() -> None:
     connectable = async_engine_from_config(
-        configuration,
+        config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
@@ -68,7 +68,11 @@ async def run_migrations_online() -> None:
     await connectable.dispose()
 
 
+def run_migrations_online() -> None:
+    asyncio.run(run_async_migrations())
+
+
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    asyncio.run(run_migrations_online())
+    run_migrations_online()

@@ -1,25 +1,35 @@
 """
-Минимальные настройки, нужные слою БД и миграциям.
+Настройки приложения.
 
-Полный конфиг (токен бота и пр.) дополняется в чате «Бэкенд: ядро».
-Здесь — только то, без чего не работают модели и Alembic.
+Версия 2.0 — дополнена в модуле «Бэкенд: ядро».
+Добавлены: JWT, Telegram Bot Token для валидации Mini App initData.
+
+Принцип: всё через .env, никаких секретов в коде.
 """
 import os
 
 from dotenv import load_dotenv
 
-# Загружаем переменные из файла .env (если он есть) в окружение.
 load_dotenv()
 
-# Строка подключения к БД. Берётся из .env, с дефолтом для локальной разработки.
-# Формат async-драйвера: postgresql+asyncpg://user:password@host:port/dbname
+# --- База данных ---
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/friendship",
+    "postgresql+asyncpg://friendship:friendship@localhost:5432/friendship",
 )
 
 # --- Продуктовые параметры ---
-# Максимальный размер компании на MVP. Проверяется в сервисном слое перед
-# добавлением участника. После MVP для групп >20 вводятся иные условия —
-# тогда меняется только эта константа и логика сервиса, схема БД не трогается.
 MAX_GROUP_SIZE: int = 20
+
+# --- JWT ---
+# Секрет для подписи токенов. Генерируется командой: openssl rand -hex 32
+# ОБЯЗАТЕЛЬНО переопределить в .env на продакшне.
+JWT_SECRET: str = os.getenv("JWT_SECRET", "")
+JWT_ALGORITHM: str = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+
+# --- Telegram ---
+# Токен бота нужен для валидации initData из Telegram Mini App.
+# Получить у @BotFather командой /token.
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
