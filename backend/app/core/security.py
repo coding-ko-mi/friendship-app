@@ -3,6 +3,9 @@ JWT-утилиты: создание и верификация токенов.
 
 Используют настройки из app.config (не из pydantic Settings —
 для совместимости с существующим config.py проекта).
+
+Также реэкспортирует validate_init_data из app.core.telegram_auth —
+это единая точка входа для валидации Telegram initData во всём проекте.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -16,6 +19,7 @@ from app.config import (
     JWT_SECRET,
     REFRESH_TOKEN_EXPIRE_DAYS,
 )
+from app.core.telegram_auth import validate_init_data as validate_init_data  # noqa: F401
 
 TokenType = Literal["access", "refresh"]
 

@@ -50,6 +50,7 @@ def get_matching_service(
     return MatchingService(
         matching_repo=MatchingRepository(session),
         skip_repo=SkipRepository(redis),
+        redis=redis,
     )
 
 

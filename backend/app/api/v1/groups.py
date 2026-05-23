@@ -19,6 +19,7 @@ profiles, questionnaire, discovery) — короткий префикс в ро�
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Зависимость из модуля «Бэкенд: ядро» (контракт из git_status_handoff_2.md):
@@ -27,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.database import get_session
 from app.models.user import User
+from app.redis_client import get_redis
 from app.repositories.group_repository import GroupRepository
 from app.schemas.groups import GroupCard, GroupCreate, RequestCard, RequestCreate, VoteResult
 from app.services.group_service import (
@@ -47,14 +49,15 @@ requests_router = APIRouter(prefix="/requests", tags=["groups"])
 # --------------------------------------------------------------------- #
 def get_group_service(
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
 ) -> GroupService:
     """
     Собрать GroupService с его репозиторием.
 
-    Сервис не знает, откуда берётся session — её подставляет FastAPI.
-    Так сервис остаётся тестируемым (в тестах подставим фейковый репозиторий).
+    Сервис не знает, откуда берётся session/redis — их подставляет FastAPI.
+    Так сервис остаётся тестируемым (в тестах подставим фейковые зависимости).
     """
-    return GroupService(group_repo=GroupRepository(session))
+    return GroupService(group_repo=GroupRepository(session), redis=redis)
 
 
 def _to_http(error: Exception) -> HTTPException:

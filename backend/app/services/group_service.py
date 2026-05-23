@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import math
 
+from redis.asyncio import Redis
+
 from app.config import FULL_HOUSE_SIZE, MAX_GROUP_SIZE
 from app.models.enums import AchievementCode, RequestStatus, RequestType
 from app.models.user import User
@@ -39,6 +41,7 @@ from app.schemas.groups import (
     VoteResult,
 )
 from app.services.achievement_service import AchievementService
+from app.services.events import enqueue_event, vote_result_event
 
 
 # --------------------------------------------------------------------- #
@@ -67,8 +70,9 @@ class ConflictError(GroupError):
 class GroupService:
     """Жизненный цикл компании и голосование по изменению состава."""
 
-    def __init__(self, *, group_repo: GroupRepository) -> None:
+    def __init__(self, *, group_repo: GroupRepository, redis: Redis) -> None:
         self.group_repo = group_repo
+        self._redis = redis
 
     # ================================================================== #
     #  ВСПОМОГАТЕЛЬНОЕ                                                    #
@@ -106,6 +110,28 @@ class GroupService:
         """
         await self._achievement_service().grant(
             user_id=user_id, code=AchievementCode.FOUNDER
+        )
+
+    async def _notify_vote_result(self, request, accepted: bool) -> None:
+        """
+        Поставить событие пуша в очередь после завершения голосования.
+
+        Только для join/invite (есть конкретный заявитель). Merge пропускаем:
+        у слияния нет единственного адресата — это решение двух компаний.
+        Вызывается ПОСЛЕ коммита.
+        """
+        if request.type is RequestType.MERGE or request.subject_user_id is None:
+            return
+        group = await self.group_repo.get_group(request.target_group_id)
+        if group is None:
+            return
+        await enqueue_event(
+            self._redis,
+            vote_result_event(
+                user_id=request.subject_user_id,
+                group_name=group.name,
+                accepted=accepted,
+            ),
         )
 
     async def _check_group_achievements(self, group_id: int) -> None:
@@ -384,6 +410,13 @@ class GroupService:
 
         result = await self._evaluate_and_finalize(request)
         await self.group_repo.session.commit()
+
+        # Уведомляем заявителя об итоге голосования (только после коммита).
+        if result.finalized:
+            await self._notify_vote_result(
+                request, accepted=(result.status is RequestStatus.ACCEPTED)
+            )
+
         return result
 
     async def _voting_group_ids(self, request) -> list[int]:

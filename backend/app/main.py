@@ -19,6 +19,7 @@ from app.api.v1 import (
     groups,
     profiles,
     questionnaire,
+    registration,
 )
 
 app = FastAPI(
@@ -38,6 +39,8 @@ app.include_router(groups.groups_router, prefix="/api/v1")
 app.include_router(groups.requests_router, prefix="/api/v1")
 # Достижения (витрина).
 app.include_router(achievements.router, prefix="/api/v1")
+# Гибридная регистрация: фото из бота + анкета из Mini App.
+app.include_router(registration.router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])

@@ -1,10 +1,11 @@
 """
 Настройки приложения.
 
-Версия 3.0 — дополнена в модуле «Бэкенд: мэтчинг».
+Версия 4.0 — дополнена в модуле «Бот (aiogram)».
 История:
   • v2.0 (ядро): JWT, Telegram Bot Token для валидации Mini App initData.
   • v3.0 (мэтчинг): Redis и параметры ленты подбора.
+  • v4.0 (бот): URL Mini App, TTL ожидающего фото, имя Redis-очереди событий.
 
 Принцип: всё через .env, никаких секретов в коде.
 """
@@ -22,7 +23,7 @@ DATABASE_URL: str = os.getenv(
 
 # --- Redis ---
 # Подключение к Redis. Дефолт — локальный Redis на стандартном порту.
-# Используется для skip-пометок ленты (с TTL), позже — FSM-сторадж бота и кэш.
+# Используется для skip-пометок ленты (с TTL), FSM-сторадж бота, очередь событий.
 # Формат: redis://[:password]@host:port/db_number
 REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -49,6 +50,24 @@ REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"
 # Токен бота нужен для валидации initData из Telegram Mini App.
 # Получить у @BotFather командой /token.
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+# --- Параметры бота (модуль «Бот (aiogram)») ---
+# URL Telegram Mini App. Бот открывает его кнопкой после получения фото —
+# там пользователь дозаполняет анкету (имя/возраст/о себе/город/интересы).
+# На проде это адрес задеплоенного фронтенда (https-домен, требование Telegram).
+MINI_APP_URL: str = os.getenv("MINI_APP_URL", "https://example.com/app")
+
+# Сколько секунд «ожидающее фото» живёт в Redis до записи анкеты из Mini App.
+# Гибридная регистрация: бот кладёт file_id в Redis, затем фронт шлёт остальные
+# поля в POST /registration, и API забирает фото отсюда. Если человек прислал
+# фото, но так и не заполнил анкету — фото само истечёт через этот TTL.
+# 24 часа: с запасом на то, что регистрацию закончат не сразу.
+PENDING_PHOTO_TTL_SECONDS: int = int(os.getenv("PENDING_PHOTO_TTL_SECONDS", "86400"))
+
+# Имя Redis-списка, через который БЭКЕНД (API) передаёт боту события для пушей
+# (мэтч, результат голосования). API делает RPUSH, бот — BLPOP. Так два процесса
+# (uvicorn и бот) связаны без общего кода и без HTTP между ними.
+EVENTS_QUEUE_KEY: str = os.getenv("EVENTS_QUEUE_KEY", "bot:events")
 
 # --- Параметры мэтчинга (модуль «Бэкенд: мэтчинг») ---
 # Сколько дней «пропущенный» (skip) пользователь не показывается снова в ленте.

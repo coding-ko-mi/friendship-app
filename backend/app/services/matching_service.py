@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+from redis.asyncio import Redis
+
 from app.config import DISCOVERY_PAGE_SIZE
 from app.models.enums import AchievementCode
 from app.models.user import User
@@ -30,6 +32,7 @@ from app.schemas.matching import (
     SkipResult,
 )
 from app.services.achievement_service import AchievementService
+from app.services.events import enqueue_event, match_event
 
 
 class MatchingError(Exception):
@@ -52,9 +55,11 @@ class MatchingService:
         *,
         matching_repo: MatchingRepository,
         skip_repo: SkipRepository,
+        redis: Redis,
     ) -> None:
         self.matching_repo = matching_repo
         self.skip_repo = skip_repo
+        self._redis = redis
 
     # ------------------------------------------------------------------ #
     #  ВСПОМОГАТЕЛЬНОЕ                                                   #
@@ -187,6 +192,7 @@ class MatchingService:
         existing = await self.matching_repo.match_exists(
             user_a_id=user_a_id, user_b_id=user_b_id
         )
+        is_new_match = existing is None
         if existing is not None:
             match_id = existing.id
         else:
@@ -199,6 +205,16 @@ class MatchingService:
         await self._grant_first_meet(from_user.id, to_user_id)
 
         await self.matching_repo.session.commit()
+
+        # Пуш о мэтче — только для НОВОГО мэтча (повторный BLPOP не нужен).
+        if is_new_match:
+            await enqueue_event(self._redis, match_event(
+                user_id=from_user.id, partner_name=target.name
+            ))
+            await enqueue_event(self._redis, match_event(
+                user_id=to_user_id, partner_name=from_user.name
+            ))
+
         return LikeResult(is_mutual=True, match_id=match_id)
 
     # ------------------------------------------------------------------ #
