@@ -1,5 +1,5 @@
 """
-Точка входа FastAPI-приложения (Telegram Mini App API).
+Точка входа FastAPI-приложения (КО МИ — Mini App API).
 
 Использует существующую инфраструктуру проекта:
 - app/config.py      — настройки
@@ -12,12 +12,19 @@
 
 from fastapi import FastAPI
 
-from app.api.v1 import auth, profiles, questionnaire, discovery
+from app.api.v1 import (
+    achievements,
+    auth,
+    discovery,
+    groups,
+    profiles,
+    questionnaire,
+)
 
 app = FastAPI(
-    title="Friendship App — Mini App API",
+    title="КО МИ — Mini App API",
     description="API для Telegram Mini App. Авторизация через Telegram initData.",
-    version="0.2.0",
+    version="0.4.0",
 )
 
 # --- Роутеры ---
@@ -26,6 +33,11 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(profiles.router, prefix="/api/v1")
 app.include_router(questionnaire.router, prefix="/api/v1")
 app.include_router(discovery.router, prefix="/api/v1")
+# Компании + голосование: два роутера (разные пути /groups и /requests).
+app.include_router(groups.groups_router, prefix="/api/v1")
+app.include_router(groups.requests_router, prefix="/api/v1")
+# Достижения (витрина).
+app.include_router(achievements.router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])

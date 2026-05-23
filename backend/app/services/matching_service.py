@@ -10,11 +10,17 @@
 Транспорт (HTTP) и доступ к БД сюда не лезут — сервис оркеструет репозитории
 и возвращает готовые схемы. Уведомление о мэтче НЕ отправляется здесь:
 сервис лишь возвращает is_mutual + match_id, а пуш делает модуль «Бот».
+
+Достижение FIRST_MEET («Первая встреча») выдаётся здесь — обоим участникам при
+взаимном мэтче, на той же сессии (в одной транзакции с созданием Match).
+Идемпотентно: у каждого пользователя оно появится только при первом мэтче.
 """
 from __future__ import annotations
 
 from app.config import DISCOVERY_PAGE_SIZE
+from app.models.enums import AchievementCode
 from app.models.user import User
+from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.matching_repository import MatchingRepository
 from app.repositories.skip_repository import SkipRepository
 from app.schemas.matching import (
@@ -23,6 +29,7 @@ from app.schemas.matching import (
     LikeResult,
     SkipResult,
 )
+from app.services.achievement_service import AchievementService
 
 
 class MatchingError(Exception):
@@ -50,6 +57,31 @@ class MatchingService:
         self.skip_repo = skip_repo
 
     # ------------------------------------------------------------------ #
+    #  ВСПОМОГАТЕЛЬНОЕ                                                   #
+    # ------------------------------------------------------------------ #
+    def _achievement_service(self) -> AchievementService:
+        """
+        Собрать сервис достижений на ТЕКУЩЕЙ сессии.
+
+        Тот же session, что и у matching_repo → выдача FIRST_MEET идёт в одной
+        транзакции с созданием Match. Конструктор и роутер не меняются.
+        """
+        return AchievementService(
+            repo=AchievementRepository(self.matching_repo.session)
+        )
+
+    async def _grant_first_meet(self, user_a_id: int, user_b_id: int) -> None:
+        """
+        Выдать «Первую встречу» (FIRST_MEET) обоим участникам мэтча.
+
+        Идемпотентно: grant_many выдаст достижение только тем, у кого его ещё
+        нет. Поэтому при втором и последующих мэтчах ничего не задвоится.
+        """
+        await self._achievement_service().grant_many(
+            user_ids=(user_a_id, user_b_id), code=AchievementCode.FIRST_MEET
+        )
+
+    # ------------------------------------------------------------------ #
     #  ЛЕНТА                                                             #
     # ------------------------------------------------------------------ #
     async def get_feed(
@@ -75,18 +107,14 @@ class MatchingService:
         Возраст приходит из анкеты (partner_age_min/max) — диапазон считает
         вызывающий код (роутер/зависимость), сервис принимает уже готовые границы.
         """
-        # 1. Интересы текущего пользователя — по ним считается совпадение.
         my_interest_ids = await self.matching_repo.get_user_interest_ids(
             current_user.id
         )
 
-        # 2. Исключения: уже лайкнутые (из БД) + скипнутые (из Redis).
         liked_ids = await self.matching_repo.get_liked_user_ids(current_user.id)
         skipped_ids = await self.skip_repo.get_skipped_ids(current_user.id)
-        # set убирает дубли, если кандидат и лайкнут, и скипнут.
         excluded_ids = list(set(liked_ids) | set(skipped_ids))
 
-        # 3. Кандидаты с фильтрами и скорингом.
         rows = await self.matching_repo.fetch_candidates(
             current_user_id=current_user.id,
             current_user_interest_ids=my_interest_ids,
@@ -98,7 +126,6 @@ class MatchingService:
             limit=limit,
         )
 
-        # 4. Собираем карточки. Для каждой подтягиваем общие интересы по названиям.
         candidates: list[CandidateCard] = []
         for candidate, shared_count in rows:
             shared_names = await self.matching_repo.get_shared_interest_names(
@@ -110,8 +137,6 @@ class MatchingService:
             card.shared_count = shared_count
             candidates.append(card)
 
-        # 5. Курсор следующей страницы = id последнего кандидата.
-        # Если кандидатов меньше лимита — страниц больше нет (next_cursor=None).
         next_cursor = candidates[-1].id if len(candidates) == limit else None
 
         return DiscoveryFeed(candidates=candidates, next_cursor=next_cursor)
@@ -127,22 +152,18 @@ class MatchingService:
           • нельзя лайкнуть себя;
           • цель должна существовать и не быть забаненной;
           • повторный лайк — не ошибка, просто возвращаем текущее состояние;
-          • если встречный лайк уже есть → создаём Match (канонический порядок).
+          • если встречный лайк уже есть → создаём Match (канонический порядок)
+            и выдаём обоим достижение FIRST_MEET.
 
         Возвращает is_mutual (+ match_id, если мэтч). Пуш о мэтче — модуль «Бот».
         """
-        # Защита: лайк самому себе. CHECK в БД это тоже ловит, но лучше отдать
-        # понятную доменную ошибку до запроса в базу.
         if from_user.id == to_user_id:
             raise SelfActionError("Нельзя лайкнуть самого себя")
 
-        # Цель существует и не забанена?
         target = await self.matching_repo.get_target_user(to_user_id)
         if target is None or target.is_banned:
             raise TargetNotFoundError("Пользователь не найден")
 
-        # Повторный лайк — идемпотентно. Проверяем, не было ли уже мэтча,
-        # чтобы вернуть консистентный ответ.
         already_liked = await self.matching_repo.like_exists(
             from_user_id=from_user.id, to_user_id=to_user_id
         )
@@ -151,34 +172,34 @@ class MatchingService:
                 from_user_id=from_user.id, to_user_id=to_user_id
             )
 
-        # Есть ли встречный лайк (target → from_user)? Если да — это мэтч.
         reciprocal = await self.matching_repo.like_exists(
             from_user_id=to_user_id, to_user_id=from_user.id
         )
 
         if not reciprocal:
-            # Взаимности пока нет — лайк сохранён, ждём ответного шага.
             await self.matching_repo.session.commit()
             return LikeResult(is_mutual=False)
 
         # --- Взаимный лайк: создаём (или находим) Match ---
-        # Канонический порядок: меньший id всегда user_a. Этого требует
-        # CHECK-ограничение ck_match_canonical_order и UniqueConstraint пары.
+        # Канонический порядок: меньший id всегда user_a.
         user_a_id, user_b_id = sorted((from_user.id, to_user_id))
 
         existing = await self.matching_repo.match_exists(
             user_a_id=user_a_id, user_b_id=user_b_id
         )
         if existing is not None:
-            # Мэтч уже был (например, гонка двойного лайка) — не дублируем.
-            await self.matching_repo.session.commit()
-            return LikeResult(is_mutual=True, match_id=existing.id)
+            match_id = existing.id
+        else:
+            match = await self.matching_repo.add_match(
+                user_a_id=user_a_id, user_b_id=user_b_id
+            )
+            match_id = match.id
 
-        match = await self.matching_repo.add_match(
-            user_a_id=user_a_id, user_b_id=user_b_id
-        )
+        # Достижение «Первая встреча» обоим — в той же транзакции (идемпотентно).
+        await self._grant_first_meet(from_user.id, to_user_id)
+
         await self.matching_repo.session.commit()
-        return LikeResult(is_mutual=True, match_id=match.id)
+        return LikeResult(is_mutual=True, match_id=match_id)
 
     # ------------------------------------------------------------------ #
     #  SKIP                                                              #

@@ -48,7 +48,7 @@ class ProfileService:
             update_data["display_name"] = data.display_name
         if data.gender is not None:
             update_data["gender"] = data.gender.value
-        if data.latitude is not None:
+        if data.latitude is not None and data.longitude is not None:
             update_data["latitude"] = data.latitude
             update_data["longitude"] = data.longitude
         if data.is_visible is not None:
