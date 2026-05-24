@@ -17,6 +17,8 @@ from app.api.v1 import (
     auth,
     discovery,
     groups,
+    interests,
+    photo,
     profiles,
     questionnaire,
     registration,
@@ -41,6 +43,10 @@ app.include_router(groups.requests_router, prefix="/api/v1")
 app.include_router(achievements.router, prefix="/api/v1")
 # Гибридная регистрация: фото из бота + анкета из Mini App.
 app.include_router(registration.router, prefix="/api/v1")
+# Справочник интересов (онбординг Mini App).
+app.include_router(interests.router, prefix="/api/v1")
+# Прокси Telegram-фото по file_id (для <img> в Mini App).
+app.include_router(photo.router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])

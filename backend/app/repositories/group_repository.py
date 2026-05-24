@@ -84,6 +84,23 @@ class GroupRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_member_cities(self, group_id: int) -> list[str]:
+        """
+        Города всех участников компании (для достижения «Без границ»).
+
+        Возвращаем именно список (с дублями), а не множество: сервису удобно
+        просто посчитать `len(set(...))`, а одинокое первое сравнение «> 1»
+        работает в обоих случаях. Запрос быстрее, чем подгружать User целиком,
+        потому что выбираем одно поле.
+        """
+        stmt = (
+            select(User.city)
+            .join(GroupMember, GroupMember.user_id == User.id)
+            .where(GroupMember.group_id == group_id)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def delete_group(self, group_id: int) -> None:
         """
         Удалить компанию. Используется при merge: присоединяемая (subject)

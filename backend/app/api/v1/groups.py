@@ -29,8 +29,10 @@ from app.api.deps import get_current_user
 from app.database import get_session
 from app.models.user import User
 from app.redis_client import get_redis
+from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.group_repository import GroupRepository
 from app.schemas.groups import GroupCard, GroupCreate, RequestCard, RequestCreate, VoteResult
+from app.services.achievement_service import AchievementService
 from app.services.group_service import (
     ConflictError,
     GroupService,
@@ -57,7 +59,16 @@ def get_group_service(
     Сервис не знает, откуда берётся session/redis — их подставляет FastAPI.
     Так сервис остаётся тестируемым (в тестах подставим фейковые зависимости).
     """
-    return GroupService(group_repo=GroupRepository(session), redis=redis)
+    return GroupService(
+        group_repo=GroupRepository(session),
+        # AchievementService собирается на ТОЙ ЖЕ сессии → выдача FOUNDER и
+        # пороговых (NO_BORDERS, FULL_HOUSE) идёт в одной транзакции с
+        # изменением состава компании.
+        achievement_service=AchievementService(
+            achievement_repo=AchievementRepository(session)
+        ),
+        redis=redis,
+    )
 
 
 def _to_http(error: Exception) -> HTTPException:

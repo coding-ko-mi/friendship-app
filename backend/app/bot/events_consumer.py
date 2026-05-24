@@ -44,6 +44,12 @@ async def _dispatch(bot: Bot, event: dict) -> None:
             group_name=event["group_name"],
             accepted=event["accepted"],
         )
+    elif event_type == EventType.ACHIEVEMENT.value:
+        await notifications.notify_achievement(
+            bot,
+            user_id=event["user_id"],
+            achievement_name=event["achievement_name"],
+        )
     else:
         # Неизвестный тип — логируем и игнорируем (не роняем consumer).
         logger.warning("Неизвестный тип события: %r", event_type)

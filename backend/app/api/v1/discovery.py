@@ -22,9 +22,11 @@ from app.config import DISCOVERY_PAGE_SIZE
 from app.database import get_session
 from app.models.user import User
 from app.redis_client import get_redis
+from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.matching_repository import MatchingRepository
 from app.repositories.skip_repository import SkipRepository
 from app.schemas.matching import DiscoveryFeed, LikeResult, SkipResult
+from app.services.achievement_service import AchievementService
 from app.services.matching_service import (
     MatchingService,
     SelfActionError,
@@ -50,6 +52,11 @@ def get_matching_service(
     return MatchingService(
         matching_repo=MatchingRepository(session),
         skip_repo=SkipRepository(redis),
+        # AchievementService собирается на ТОЙ ЖЕ сессии → выдача FIRST_MEETING
+        # идёт в одной транзакции с созданием Match.
+        achievement_service=AchievementService(
+            achievement_repo=AchievementRepository(session)
+        ),
         redis=redis,
     )
 

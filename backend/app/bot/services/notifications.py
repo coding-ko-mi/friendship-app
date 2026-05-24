@@ -90,3 +90,22 @@ async def notify_vote_result(
         text=template.format(group_name=group_name),
         markup=keyboards.open_app_keyboard(register=False),
     )
+
+
+async def notify_achievement(
+    bot: Bot, *, user_id: int, achievement_name: str
+) -> bool:
+    """
+    Пуш о полученном достижении (FOUNDER, FIRST_MEETING, NO_BORDERS, FULL_HOUSE).
+
+    achievement_name — уже человекочитаемое имя из справочника (бэк прислал в
+    событии готовое, чтобы бот не ходил повторно в БД).
+    """
+    from app.bot import keyboards
+
+    return await _safe_send(
+        bot,
+        user_id=user_id,
+        text=texts.NOTIFY_ACHIEVEMENT.format(name=achievement_name),
+        markup=keyboards.open_app_keyboard(register=False),
+    )

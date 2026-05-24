@@ -1,24 +1,18 @@
 """
-Seed-скрипт справочника достижений (таблица `achievements`).
+Seed-скрипт справочника достижений.
 
-Наполняет справочник достижениями. Без него выдавать технически нечего
-(AchievementService.grant не найдёт код и тихо пропустит выдачу) — поэтому
-скрипт обязателен перед первым запуском, как seed_interests.
+Наполняет таблицу `achievements` полным набором достижений. Без него витрина
+пуста и выдавать нечего (grant по коду не находит запись) — поэтому скрипт
+обязателен перед первым запуском и после каждого расширения списка.
 
-Чем отличается от seed_interests: здесь UPSERT, а не только вставка.
-Повторный прогон ОБНОВЛЯЕТ name/description у существующих кодов. Смысл:
-ты редактируешь тексты ниже, перезапускаешь скрипт — и витрина показывает
-новые формулировки. Менять справочник можно без миграций и без правки логики.
+Идемпотентность: повторный запуск не создаёт дублей и не трогает существующие.
+Проверяем по `code` (он UNIQUE в схеме) и вставляем только отсутствующие.
+То же поведение, что у seed_interests (там — по name).
 
-  • code   — технический идентификатор, по нему код выдаёт достижение.
-             Менять НЕ нужно (на него завязана логика). Уникален.
-  • name / description — то, что видит пользователь. Меняй свободно.
-
-Как добавить достижение позже:
-  1) Если оно выдаётся автоматически — добавь код в AchievementCode (enums.py)
-     и хук в место события. Если только для витрины — этого не нужно.
-  2) Добавь строку в ACHIEVEMENTS ниже.
-  3) Прогони скрипт.
+Что наполняем: ВСЕ задуманные достижения, включая те, что пока не выдаются.
+Невыдаваемые нужны в справочнике, чтобы витрина показывала полную карту
+прогресса («ещё не открыто») — это ядро петли вовлечённости. Механики их
+выдачи появятся в следующих модулях (чек-ины, отметки, признание главным).
 
 Запуск (из папки backend/, при поднятой БД):
     python -m app.scripts.seed_achievements
@@ -31,66 +25,83 @@ from sqlalchemy import select
 
 from app.database import async_session_factory
 from app.models.achievement import Achievement
+from app.models.enums import AchievementCode
 
-# --------------------------------------------------------------------- #
-#  СПРАВОЧНИК ДОСТИЖЕНИЙ — редактируй здесь                             #
-# --------------------------------------------------------------------- #
-# Формат строки: (code, name, description).
-# Сейчас наполнены только 4 достижения с автоматической выдачей.
-# Остальные (визиты, благодарности, «душа компании») добавишь сюда позже,
-# когда под них появятся фичи и ты убедишься, что продукт работает.
-ACHIEVEMENTS: list[tuple[str, str, str]] = [
-    (
-        "FOUNDER",
-        "Основатель",
-        "Заложил начало компании — создал её из своего знакомства.",
-    ),
-    (
-        "FIRST_MEET",
-        "Первая встреча",
-        "Провёл первое знакомство один на один.",
-    ),
-    (
-        "FULL_HOUSE",
-        "Полный состав",
-        "Собрал компанию из 8 человек — главная цель игры пройдена.",
-    ),
-    (
-        "NO_BORDERS",
-        "Без границ",
-        "Собрал компанию, в которой есть люди из двух и более городов.",
-    ),
+# Справочник достижений: code (из AchievementCode) → имя и описание для UI.
+# Тексты можно править свободно — на связь выданных достижений влияет только
+# code. Порядок в списке = порядок появления в витрине.
+ACHIEVEMENTS: list[dict[str, str]] = [
+    {
+        "code": AchievementCode.FOUNDER.value,
+        "name": "Основатель",
+        "description": "Заложил начало компании.",
+    },
+    {
+        "code": AchievementCode.FIRST_MEETING.value,
+        "name": "Первая встреча",
+        "description": "Состоялось первое взаимное знакомство.",
+    },
+    {
+        "code": AchievementCode.NO_BORDERS.value,
+        "name": "Без границ",
+        "description": "В компании собрались люди из разных городов.",
+    },
+    {
+        "code": AchievementCode.FULL_HOUSE.value,
+        "name": "Полный состав",
+        "description": "Компания собрала полный состав участников.",
+    },
+    # --- Ниже — заведены для витрины, выдача появится позже ---
+    {
+        "code": AchievementCode.COMMUNITY_LEADER.value,
+        "name": "Лидер комьюнити",
+        "description": "Собрал самую большую компанию в сообществе.",
+    },
+    {
+        "code": AchievementCode.IRL.value,
+        "name": "В реальной жизни",
+        "description": "Посетил какое-либо место всей компанией.",
+    },
+    {
+        "code": AchievementCode.GRATITUDE.value,
+        "name": "Благодарность",
+        "description": "Получил отметку от другого человека за помощь.",
+    },
+    {
+        "code": AchievementCode.SOUL.value,
+        "name": "Душа компании",
+        "description": "Компания единогласно признала тебя главным звеном.",
+    },
 ]
 
 
 async def seed_achievements() -> None:
-    """Вставить отсутствующие достижения, обновить тексты у существующих (upsert)."""
+    """Вставить отсутствующие достижения. Существующие не трогаем."""
     async with async_session_factory() as session:
-        existing_rows = await session.execute(select(Achievement))
-        existing_by_code = {a.code: a for a in existing_rows.scalars().all()}
+        # Какие коды уже есть в БД.
+        existing = await session.execute(select(Achievement.code))
+        existing_codes = set(existing.scalars().all())
 
-        inserted = 0
-        updated = 0
-        for code, name, description in ACHIEVEMENTS:
-            current = existing_by_code.get(code)
-            if current is None:
-                session.add(
-                    Achievement(code=code, name=name, description=description)
-                )
-                inserted += 1
-                print(f"  + {code} — {name}")
-            elif current.name != name or current.description != description:
-                current.name = name
-                current.description = description
-                updated += 1
-                print(f"  ~ {code} — обновлён текст")
+        # Добавляем только те, которых ещё нет (идемпотентность по code).
+        to_add = [
+            Achievement(
+                code=item["code"],
+                name=item["name"],
+                description=item["description"],
+            )
+            for item in ACHIEVEMENTS
+            if item["code"] not in existing_codes
+        ]
 
-        if inserted == 0 and updated == 0:
-            print("Справочник достижений актуален — менять нечего.")
+        if not to_add:
+            print("Достижения уже наполнены — добавлять нечего.")
             return
 
+        session.add_all(to_add)
         await session.commit()
-        print(f"Готово. Добавлено: {inserted}, обновлено: {updated}.")
+        print(f"Добавлено достижений: {len(to_add)}")
+        for achievement in to_add:
+            print(f"  + {achievement.code}: {achievement.name}")
 
 
 if __name__ == "__main__":

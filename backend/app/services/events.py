@@ -27,6 +27,7 @@ class EventType(StrEnum):
 
     MATCH = "match"               # взаимный лайк → уведомить обоих
     VOTE_RESULT = "vote_result"   # заявка принята/отклонена → уведомить заявителя
+    ACHIEVEMENT = "achievement"   # выдано достижение → уведомить получателя
 
 
 async def enqueue_event(redis: Redis, event: dict) -> None:
@@ -67,4 +68,23 @@ def vote_result_event(*, user_id: int, group_name: str, accepted: bool) -> dict:
         "user_id": user_id,
         "group_name": group_name,
         "accepted": accepted,
+    }
+
+
+def achievement_event(*, user_id: int, achievement_name: str) -> dict:
+    """
+    Событие выдачи достижения для ОДНОГО пользователя.
+
+    Достижение всегда персональное (даже пороговые «Без границ» / «Полный
+    состав» выдаются каждому участнику отдельно), поэтому одно событие = один
+    получатель. Бэкенд кладёт по событию на каждого, кому достижение выдано
+    ВПЕРВЫЕ (повторных выдач не бывает — см. achievement_service.grant).
+
+    achievement_name — человекочитаемое имя (не code): боту его сразу
+    показывать пользователю, без обращения к справочнику.
+    """
+    return {
+        "type": EventType.ACHIEVEMENT.value,
+        "user_id": user_id,
+        "achievement_name": achievement_name,
     }

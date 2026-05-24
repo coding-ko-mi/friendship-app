@@ -1,104 +1,133 @@
 """
-Сервис достижений — единая точка выдачи и чтения (модуль «Бэкенд: достижения»).
+Сервис достижений — бизнес-логика геймификации.
 
-Разделение ответственности (важно для чистоты):
-  • КОГДА выдавать — решает место события (group_service при создании компании
-    и изменении состава, matching_service при первом мэтче). Там лежит
-    продуктовое условие.
-  • КАК выдавать и КАК читать — здесь. Один способ выдачи на весь проект:
-    проверка справочника, идемпотентность, безопасность для транзакции.
+Отвечает за:
+  • выдачу достижения по коду (идемпотентно: повтор не падает и не дублирует);
+  • сбор витрины (весь справочник + флаг earned для пользователя);
+  • вычисление пороговых условий компании (NO_BORDERS, FULL_HOUSE) —
+    «выдать ли и кому», чтобы вызывающий сервис компаний не знал деталей.
 
-Транзакция: при выдаче сервис НЕ коммитит. Он работает в той же сессии и
-транзакции, что и вызвавший его сервис (FOUNDER выдаётся внутри create_group,
-коммит делает create_group). Так создание компании и выдача атомарны.
-Методы чтения (витрина) коммита не требуют — они только SELECT.
+Ключевое решение по идемпотентности (см. handoff): grant() возвращает bool —
+True, если достижение выдано ВПЕРВЫЕ, False, если уже было. Это позволяет
+звать выдачу из любого места без страха упасть, и при этом понимать, нужно ли
+слать пуш (пуш — только при True, иначе спам при каждом пересчёте).
+
+Транспорт (HTTP) и Redis сюда не лезут: сервис лишь меняет состояние БД через
+репозиторий и СООБЩАЕТ вызывающему, что выдано впервые. Отправку пуша делает
+вызывающий сервис ПОСЛЕ commit (так требует контракт events.py: не уведомлять
+о незафиксированном). Так выдача остаётся в одной транзакции с созданием
+компании/мэтча, а пуш — уже после неё.
 """
 from __future__ import annotations
 
-import logging
-from collections.abc import Iterable
-
 from app.models.enums import AchievementCode
 from app.repositories.achievement_repository import AchievementRepository
-from app.schemas.achievements import AchievementCard, AchievementShowcase
-
-logger = logging.getLogger(__name__)
+from app.schemas.achievements import AchievementCard, AchievementsResponse
 
 
 class AchievementService:
-    """Выдача достижений и чтение их для витрины."""
+    """Выдача достижений и сбор витрины прогресса."""
 
-    def __init__(self, *, repo: AchievementRepository) -> None:
-        self.repo = repo
+    def __init__(self, *, achievement_repo: AchievementRepository) -> None:
+        self.achievement_repo = achievement_repo
 
     # ================================================================== #
-    #  ВЫДАЧА (вызывается из мест событий)                               #
+    #  ВЫДАЧА                                                            #
     # ================================================================== #
-    async def grant(self, *, user_id: int, code: AchievementCode) -> bool:
+    async def grant(self, *, user_id: int, code: str) -> bool:
         """
-        Выдать одно достижение одному пользователю.
+        Выдать пользователю достижение по коду. Идемпотентно.
 
-        Идемпотентно и безопасно:
-          • если кода нет в справочнике (seed не прогнан) — тихо выходим (no-op),
-            ядро не падает;
-          • если достижение уже выдано — ничего не делаем;
-          • иначе вставляем (flush, без commit — коммитит вызывающий сервис).
+        Возвращает:
+          • True  — достижение выдано ВПЕРВЫЕ (повод слать пуш);
+          • False — уже было раньше ИЛИ кода нет в справочнике (seed не прогнан).
 
-        Возвращает True, если достижение выдано именно сейчас (для будущего
-        модуля «Бот»: по True можно прислать пуш «получено достижение»).
-        False — если уже было или справочник пуст.
+        Почему не бросаем исключение при отсутствии кода: выдача вызывается из
+        критических путей (создание компании, мэтч). Незаполненный справочник —
+        проблема развёртывания, а не повод ронять создание компании. Тихо
+        возвращаем False и не мешаем основному сценарию.
+
+        Транзакцию НЕ коммитим: выдача должна попасть в commit вызывающего
+        сервиса (атомарно с созданием компании/мэтча).
         """
-        achievement = await self.repo.get_by_code(code.value)
-        if achievement is None:
-            # Справочник не наполнен этим кодом. Не падаем — достижения
-            # не критичный путь. Логируем, чтобы заметить незапущенный seed.
-            logger.warning(
-                "Achievement code %s отсутствует в справочнике — выдача пропущена. "
-                "Прогоните seed_achievements.",
-                code.value,
-            )
+        achievement_id = await self.achievement_repo.get_id_by_code(code)
+        if achievement_id is None:
+            # Кода нет в справочнике — выдавать нечего (seed не прогнан).
             return False
 
-        if await self.repo.has(user_id=user_id, achievement_id=achievement.id):
-            return False  # уже есть — повторно не выдаём
+        # Проверяем ДО вставки: так отличаем «выдано впервые» от «уже было»,
+        # не полагаясь на перехват ошибки PK (что усложнило бы управление
+        # транзакцией — пойманный IntegrityError помечает сессию rollback-only).
+        if await self.achievement_repo.has(
+            user_id=user_id, achievement_id=achievement_id
+        ):
+            return False
 
-        await self.repo.add(user_id=user_id, achievement_id=achievement.id)
+        await self.achievement_repo.add(
+            user_id=user_id, achievement_id=achievement_id
+        )
         return True
 
-    async def grant_many(
-        self, *, user_ids: Iterable[int], code: AchievementCode
-    ) -> list[int]:
+    async def grant_many(self, *, user_ids: list[int], code: str) -> list[int]:
         """
-        Выдать одно достижение нескольким пользователям (например, FULL_HOUSE —
-        всей компании при достижении полного состава).
+        Выдать одно достижение нескольким пользователям (пороговые: NO_BORDERS,
+        FULL_HOUSE выдаются ВСЕМ участникам компании).
 
-        Возвращает id тех, кому достижение выдано именно сейчас (кто его ещё
-        не имел) — пригодится модулю «Бот» для адресных пушей.
+        Возвращает список user_id, которым достижение выдано ВПЕРВЫЕ — именно им
+        вызывающий сервис отправит пуш (тем, у кого уже было, — не шлём).
         """
-        newly_granted: list[int] = []
+        granted_first_time: list[int] = []
         for user_id in user_ids:
             if await self.grant(user_id=user_id, code=code):
-                newly_granted.append(user_id)
-        return newly_granted
+                granted_first_time.append(user_id)
+        return granted_first_time
 
     # ================================================================== #
-    #  ЧТЕНИЕ (витрина достижений пользователя)                          #
+    #  ПОРОГОВЫЕ УСЛОВИЯ КОМПАНИИ                                        #
     # ================================================================== #
-    async def get_showcase(self, *, user_id: int) -> AchievementShowcase:
+    # Вынесены сюда (а не в group_service), чтобы вся логика «что считается
+    # достижением» жила в одном модуле. group_service лишь поставляет факты
+    # о составе (id участников, их города, размер) и зовёт эти методы.
+    @staticmethod
+    def is_no_borders(member_cities: list[str]) -> bool:
         """
-        Собрать витрину достижений для пользователя.
+        Условие «Без границ»: в компании есть люди из 2+ разных городов.
 
-        Возвращает ВЕСЬ справочник, помечая каждое как полученное (с датой) или
-        ещё закрытое. Так фронтенд показывает и достигнутое, и цели впереди —
-        это и есть петля вовлечённости. Когда ты добавишь новые достижения в
-        seed, они автоматически появятся здесь как «закрытые».
+        Принимаем готовый список городов участников (group_service умеет их
+        достать), чтобы сервис достижений не лез в чужой репозиторий.
         """
-        catalog = await self.repo.list_all()
-        earned = await self.repo.list_user(user_id)
-        # achievement_id -> когда получено. Для быстрой пометки справочника.
-        earned_at_by_id = {ua.achievement_id: ua.earned_at for ua in earned}
+        return len(set(member_cities)) >= 2
 
-        cards = [
+    @staticmethod
+    def is_full_house(member_count: int, *, threshold: int) -> bool:
+        """
+        Условие «Полный состав»: компания достигла порога участников.
+
+        threshold берётся из config (FULL_HOUSE_SIZE) — точное число (8/10) ещё
+        уточняется тестированием, поэтому хранится в одном настраиваемом месте,
+        а не зашито здесь.
+        """
+        return member_count >= threshold
+
+    # ================================================================== #
+    #  ВИТРИНА                                                           #
+    # ================================================================== #
+    async def get_showcase(self, user_id: int) -> AchievementsResponse:
+        """
+        Собрать витрину: весь справочник достижений + флаг earned (и дата) для
+        конкретного пользователя.
+
+        Один проход: берём справочник, берём полученные достижения пользователя,
+        склеиваем по achievement_id. Так фронт получает полную карту прогресса
+        (и полученное, и «ещё не открытое») за один запрос.
+        """
+        catalog = await self.achievement_repo.list_all()
+        earned_links = await self.achievement_repo.list_earned(user_id)
+
+        # achievement_id -> earned_at, чтобы проставить дату полученным.
+        earned_at_by_id = {link.achievement_id: link.earned_at for link in earned_links}
+
+        items = [
             AchievementCard(
                 code=a.code,
                 name=a.name,
@@ -109,8 +138,8 @@ class AchievementService:
             for a in catalog
         ]
 
-        return AchievementShowcase(
-            achievements=cards,
+        return AchievementsResponse(
+            items=items,
             earned_count=len(earned_at_by_id),
-            total_count=len(catalog),
+            total=len(catalog),
         )

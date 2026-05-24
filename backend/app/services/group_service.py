@@ -13,14 +13,11 @@
 и возвращает готовые схемы. Уведомления (мэтч принят / отклонён / создан чат)
 НЕ отправляются здесь — это задача модуля «Бот». Сервис лишь меняет состояние.
 
-Достижения (модуль «Бэкенд: достижения») выдаются прямо в местах событий через
-AchievementService на ТОЙ ЖЕ сессии — то есть в одной транзакции с изменением
-состава (атомарно):
-  • FOUNDER    — при создании компании (основателю);
-  • FULL_HOUSE — когда состав достиг FULL_HOUSE_SIZE (всем участникам);
-  • NO_BORDERS — когда в компании есть люди из 2+ городов (всем участникам).
-Конструктор сервиса и роутер при этом не изменились: AchievementService
-собирается лениво из текущей сессии (см. _achievement_service).
+FOUNDER-достижение: реальная выдача через AchievementService в хуке
+_grant_founder_achievement (в том же commit, что и создание компании).
+Пороговые достижения компании (NO_BORDERS, FULL_HOUSE) выдаются всем участникам
+при применении заявки. Пуши о достижениях и о результате голосования кладутся
+в events-очередь ПОСЛЕ commit (контракт app/services/events.py).
 """
 from __future__ import annotations
 
@@ -31,7 +28,6 @@ from redis.asyncio import Redis
 from app.config import FULL_HOUSE_SIZE, MAX_GROUP_SIZE
 from app.models.enums import AchievementCode, RequestStatus, RequestType
 from app.models.user import User
-from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.group_repository import GroupRepository
 from app.schemas.groups import (
     GroupCard,
@@ -41,7 +37,7 @@ from app.schemas.groups import (
     VoteResult,
 )
 from app.services.achievement_service import AchievementService
-from app.services.events import enqueue_event, vote_result_event
+from app.services.events import achievement_event, enqueue_event, vote_result_event
 
 
 # --------------------------------------------------------------------- #
@@ -70,9 +66,19 @@ class ConflictError(GroupError):
 class GroupService:
     """Жизненный цикл компании и голосование по изменению состава."""
 
-    def __init__(self, *, group_repo: GroupRepository, redis: Redis) -> None:
+    def __init__(
+        self,
+        *,
+        group_repo: GroupRepository,
+        achievement_service: AchievementService,
+        redis: Redis,
+    ) -> None:
         self.group_repo = group_repo
-        self._redis = redis
+        # Сервис достижений выдаёт FOUNDER и пороговые. Зависимость, а не
+        # прямой доступ к БД: вся логика «что считается достижением» — в нём.
+        self.achievement_service = achievement_service
+        # Redis нужен только чтобы класть пуши в events-очередь ПОСЛЕ commit.
+        self.redis = redis
 
     # ================================================================== #
     #  ВСПОМОГАТЕЛЬНОЕ                                                    #
@@ -88,79 +94,74 @@ class GroupService:
         """
         return math.ceil(0.75 * members_total)
 
-    def _achievement_service(self) -> AchievementService:
+    async def _grant_founder_achievement(self, user_id: int) -> bool:
         """
-        Собрать сервис достижений на ТЕКУЩЕЙ сессии.
+        Выдать достижение FOUNDER основателю компании.
 
-        Тот же session, что и у group_repo → выдача идёт в одной транзакции с
-        изменением состава (коммит делает вызывающий метод). Конструктор
-        GroupService и роутер при этом не меняются — сервис строится лениво.
+        Возвращает True, если выдано ВПЕРВЫЕ (повод на пуш), False — если уже
+        было или справочник не наполнен. Выдача идёт в ТЕКУЩУЮ транзакцию (без
+        commit) — её зафиксирует create_group вместе с самой компанией, чтобы
+        не получилось «компания есть, а достижение нет».
+
+        Имя и сигнатура хука сохранены намеренно: точка врезки была заложена
+        здесь ещё в модуле компаний, остальной код её не трогает.
         """
-        return AchievementService(
-            repo=AchievementRepository(self.group_repo.session)
+        return await self.achievement_service.grant(
+            user_id=user_id, code=AchievementCode.FOUNDER.value
         )
 
-    async def _grant_founder_achievement(self, user_id: int) -> None:
+    async def _grant_group_threshold_achievements(
+        self, group_id: int
+    ) -> list[tuple[int, str]]:
         """
-        Выдать достижение «Основатель» (FOUNDER) при создании компании.
+        Проверить и выдать пороговые достижения компании ВСЕМ её участникам.
 
-        Идемпотентно и без commit: выдача в той же транзакции, что и создание
-        компании. Если справочник не засижен — AchievementService тихо пропустит
-        выдачу, и компания всё равно создастся (достижения не критичный путь).
+        Пороговые — это свойства компании (а не одного человека), поэтому при
+        срабатывании выдаются каждому текущему участнику:
+          • NO_BORDERS («Без границ») — есть участники из 2+ городов;
+          • FULL_HOUSE («Полный состав») — достигнут порог FULL_HOUSE_SIZE.
+
+        Выдача идёт в текущую транзакцию (без commit). Возвращает список
+        (user_id, имя_достижения) ТОЛЬКО для тех, кому выдано впервые — этим
+        людям вызывающий код отправит пуш после commit.
+
+        Зовётся при создании компании и при каждом применении заявки (когда
+        состав мог измениться). Идемпотентность grant гарантирует: повторные
+        вызовы не плодят дублей и не шлют повторных пушей.
         """
-        await self._achievement_service().grant(
-            user_id=user_id, code=AchievementCode.FOUNDER
-        )
+        member_ids = await self.group_repo.get_member_ids(group_id)
+        pending: list[tuple[int, str]] = []
 
-    async def _notify_vote_result(self, request, accepted: bool) -> None:
-        """
-        Поставить событие пуша в очередь после завершения голосования.
-
-        Только для join/invite (есть конкретный заявитель). Merge пропускаем:
-        у слияния нет единственного адресата — это решение двух компаний.
-        Вызывается ПОСЛЕ коммита.
-        """
-        if request.type is RequestType.MERGE or request.subject_user_id is None:
-            return
-        group = await self.group_repo.get_group(request.target_group_id)
-        if group is None:
-            return
-        await enqueue_event(
-            self._redis,
-            vote_result_event(
-                user_id=request.subject_user_id,
-                group_name=group.name,
-                accepted=accepted,
-            ),
-        )
-
-    async def _check_group_achievements(self, group_id: int) -> None:
-        """
-        Проверить и выдать достижения, зависящие от состава компании.
-
-        Вызывается после ЛЮБОГО изменения состава (создание компании, приём
-        заявки join/invite, merge):
-          • FULL_HOUSE — состав достиг FULL_HOUSE_SIZE → всем участникам;
-          • NO_BORDERS — в составе есть люди из 2+ городов → всем участникам.
-
-        Идемпотентно: повторные вызовы (например, состав снова стал «полным»
-        после merge) не выдают достижение дважды — об этом заботится grant.
-        """
-        members = await self.group_repo.get_members(group_id)
-        member_ids = [m.id for m in members]
-        service = self._achievement_service()
-
-        # FULL_HOUSE: собран полный состав — «прохождение игры».
-        if len(members) >= FULL_HOUSE_SIZE:
-            await service.grant_many(
-                user_ids=member_ids, code=AchievementCode.FULL_HOUSE
+        # «Без границ»: 2+ разных города среди участников.
+        cities = await self.group_repo.get_member_cities(group_id)
+        if self.achievement_service.is_no_borders(cities):
+            granted = await self.achievement_service.grant_many(
+                user_ids=member_ids, code=AchievementCode.NO_BORDERS.value
             )
+            pending += [(uid, "Без границ") for uid in granted]
 
-        # NO_BORDERS: в компании представлены минимум два города.
-        distinct_cities = {m.city for m in members}
-        if len(distinct_cities) >= 2:
-            await service.grant_many(
-                user_ids=member_ids, code=AchievementCode.NO_BORDERS
+        # «Полный состав»: достигнут настраиваемый порог участников.
+        if self.achievement_service.is_full_house(
+            len(member_ids), threshold=FULL_HOUSE_SIZE
+        ):
+            granted = await self.achievement_service.grant_many(
+                user_ids=member_ids, code=AchievementCode.FULL_HOUSE.value
+            )
+            pending += [(uid, "Полный состав") for uid in granted]
+
+        return pending
+
+    async def _push_achievements(self, pending: list[tuple[int, str]]) -> None:
+        """
+        Отправить пуши о выданных достижениях в events-очередь.
+
+        Вызывать ТОЛЬКО после commit: контракт events.py требует не уведомлять
+        о незафиксированном. На вход — список (user_id, имя_достижения) для тех,
+        кому достижение выдано впервые (повторных пушей не шлём).
+        """
+        for user_id, name in pending:
+            await enqueue_event(
+                self.redis, achievement_event(user_id=user_id, achievement_name=name)
             )
 
     # ================================================================== #
@@ -176,7 +177,7 @@ class GroupService:
           • мэтч должен существовать;
           • текущий пользователь (founder) должен быть его участником;
           • компания рождается сразу из ДВУХ человек — основателя и мэтч-партнёра;
-          • основателю выдаётся FOUNDER, составу — достижения состава.
+          • основателю вешается хук FOUNDER.
 
         Так голосование осмысленно с первого дня: следующая join-заявка считает
         порог от 2 участников (нужны оба «за»), а не от вырожденной «компании из 1».
@@ -200,12 +201,26 @@ class GroupService:
         await self.group_repo.add_member(user_id=founder.id, group_id=group.id)
         await self.group_repo.add_member(user_id=partner_id, group_id=group.id)
 
-        # Достижение основателю.
-        await self._grant_founder_achievement(founder.id)
-        # Достижения состава: NO_BORDERS возможен уже на двух разных городах.
-        await self._check_group_achievements(group.id)
+        # Выдача достижений ДО commit — чтобы попасть в одну транзакцию с
+        # созданием компании. Накапливаем, кому слать пуш (выдано впервые),
+        # и отправляем уже ПОСЛЕ commit (контракт events: не уведомлять о
+        # незафиксированном).
+        pending: list[tuple[int, str]] = []  # (user_id, имя достижения)
+
+        # FOUNDER — основателю.
+        if await self._grant_founder_achievement(founder.id):
+            pending.append((founder.id, "Основатель"))
+
+        # Пороговые: компания родилась из 2 человек — «Полный состав» при пороге
+        # >2 ещё недостижим, но «Без границ» возможен сразу (основатель и партнёр
+        # из разных городов). Считаем общим методом, чтобы логика была в одном месте.
+        pending += await self._grant_group_threshold_achievements(group.id)
 
         await self.group_repo.session.commit()
+
+        # Пуши — после фиксации. Падение пуша не должно влиять на уже созданную
+        # компанию, поэтому отправка идёт после commit и изолирована.
+        await self._push_achievements(pending)
 
         return await self.get_group_card(group.id)
 
@@ -279,11 +294,15 @@ class GroupService:
         subject_group_id: int | None,
     ) -> RequestCard:
         """Общая логика join/invite: субъект — одиночка."""
+        # Субъект должен быть ровно одиночкой (заполнен subject_user_id, не group).
         if subject_user_id is None or subject_group_id is not None:
             raise ValidationError_(
                 "Для join/invite нужен subject_user_id (и только он)"
             )
 
+        # Кто вправе подать:
+        #   join   — сам одиночка (subject == current_user);
+        #   invite — участник целевой компании.
         if type_ is RequestType.JOIN:
             if subject_user_id != current_user.id:
                 raise PermissionError_("Заявку на вступление подаёт сам пользователь")
@@ -293,17 +312,20 @@ class GroupService:
             ):
                 raise PermissionError_("Приглашать может только участник компании")
 
+        # Субъект уже в компании? Тогда заявка бессмысленна.
         if await self.group_repo.is_member(
             user_id=subject_user_id, group_id=target_group_id
         ):
             raise ConflictError("Пользователь уже состоит в этой компании")
 
+        # MAX_GROUP_SIZE: добавление одного человека не должно превысить лимит.
         current_size = await self.group_repo.count_members(target_group_id)
         if current_size + 1 > MAX_GROUP_SIZE:
             raise ValidationError_(
                 f"Компания достигла лимита участников ({MAX_GROUP_SIZE})"
             )
 
+        # Нет ли уже идущего голосования по этому же человеку в эту же компанию.
         if await self.group_repo.has_pending_join(
             subject_user_id=subject_user_id, target_group_id=target_group_id
         ):
@@ -340,6 +362,7 @@ class GroupService:
         if subject is None:
             raise NotFoundError("Присоединяемая компания не найдена")
 
+        # Инициатор должен состоять хотя бы в одной из сливаемых компаний.
         in_target = await self.group_repo.is_member(
             user_id=current_user.id, group_id=target_group_id
         )
@@ -349,6 +372,8 @@ class GroupService:
         if not (in_target or in_subject):
             raise PermissionError_("Слияние инициирует участник одной из компаний")
 
+        # MAX_GROUP_SIZE: суммарный размер не должен превысить лимит.
+        # Проверяем ДО голосования — нет смысла голосовать за заведомо невозможное.
         size_target = await self.group_repo.count_members(target_group_id)
         size_subject = await self.group_repo.count_members(subject_group_id)
         if size_target + size_subject > MAX_GROUP_SIZE:
@@ -387,8 +412,10 @@ class GroupService:
         if request.status is not RequestStatus.VOTING:
             raise ConflictError("Голосование по заявке уже завершено")
 
+        # Кто вправе голосовать по этой заявке.
         voting_group_ids = await self._voting_group_ids(request)
 
+        # Голосующий должен быть участником хотя бы одной голосующей компании.
         voter_group_ids = [
             gid
             for gid in voting_group_ids
@@ -399,6 +426,7 @@ class GroupService:
         if not voter_group_ids:
             raise PermissionError_("Вы не вправе голосовать по этой заявке")
 
+        # Запрет двойного голоса (страхует и UniqueConstraint в схеме).
         if await self.group_repo.vote_exists(
             request_id=request_id, voter_id=current_user.id
         ):
@@ -408,16 +436,52 @@ class GroupService:
             request_id=request_id, voter_id=current_user.id, value=value
         )
 
+        # Пересчитать прогресс и при необходимости финализировать.
         result = await self._evaluate_and_finalize(request)
-        await self.group_repo.session.commit()
 
-        # Уведомляем заявителя об итоге голосования (только после коммита).
-        if result.finalized:
-            await self._notify_vote_result(
-                request, accepted=(result.status is RequestStatus.ACCEPTED)
+        # Если заявка принята и состав target-компании изменился — проверяем
+        # пороговые достижения (NO_BORDERS / FULL_HOUSE) и выдаём их в ТУ ЖЕ
+        # транзакцию. Накопленные пуши отправим после commit.
+        achievement_pushes: list[tuple[int, str]] = []
+        if result.finalized and result.status is RequestStatus.ACCEPTED:
+            achievement_pushes = await self._grant_group_threshold_achievements(
+                request.target_group_id
             )
 
+        await self.group_repo.session.commit()
+
+        # --- Пуши после commit (контракт events: только зафиксированное) ---
+        await self._push_achievements(achievement_pushes)
+        await self._push_vote_result(request, result)
+
         return result
+
+    async def _push_vote_result(self, request, result: VoteResult) -> None:
+        """
+        Пуш заявителю о результате голосования (принято/отклонено).
+
+        Шлём только когда исход определён (finalized). Адресат — subject_user_id
+        (для join/invite это и есть человек, которого касается решение: его
+        приняли в компанию или отклонили). Для merge subject_user_id отсутствует
+        (субъект — компания, а не человек), поэтому пуш пока не шлём — адресация
+        merge-результата требует отдельного решения (см. handoff).
+        """
+        if not result.finalized:
+            return
+        if request.subject_user_id is None:
+            return  # merge: персонального адресата нет — пропускаем
+
+        group = await self.group_repo.get_group(request.target_group_id)
+        group_name = group.name if group is not None else ""
+
+        await enqueue_event(
+            self.redis,
+            vote_result_event(
+                user_id=request.subject_user_id,
+                group_name=group_name,
+                accepted=result.status is RequestStatus.ACCEPTED,
+            ),
+        )
 
     async def _voting_group_ids(self, request) -> list[int]:
         """
@@ -456,6 +520,8 @@ class GroupService:
 
             if yes < threshold:
                 all_passed = False
+            # Невозможно достичь порога: даже если ВСЕ оставшиеся скажут «за».
+            # Оставшиеся = members_total - (уже проголосовавшие) = total - yes - no.
             remaining = members_total - yes - no
             if yes + remaining < threshold:
                 any_impossible = True
@@ -473,9 +539,6 @@ class GroupService:
         if all_passed:
             added_user_id = await self._apply_accepted(request)
             await self.group_repo.set_request_status(request, RequestStatus.ACCEPTED)
-            # Состав изменился — проверяем достижения состава целевой компании.
-            # Для merge выжившая компания — target (subject удаляется).
-            await self._check_group_achievements(request.target_group_id)
             return VoteResult(
                 request_id=request.id,
                 status=RequestStatus.ACCEPTED,
@@ -483,6 +546,7 @@ class GroupService:
                 added_user_id=added_user_id,
             )
 
+        # Исход ещё не определён — продолжаем голосование.
         return VoteResult(
             request_id=request.id,
             status=RequestStatus.VOTING,
@@ -514,7 +578,7 @@ class GroupService:
             await self.group_repo.get_member_ids(request.target_group_id)
         )
         for uid in subject_member_ids:
-            if uid not in target_member_ids:
+            if uid not in target_member_ids:  # тот, кто уже в target, не дублируется
                 await self.group_repo.add_member(
                     user_id=uid, group_id=request.target_group_id
                 )
