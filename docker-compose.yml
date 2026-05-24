@@ -1,0 +1,161 @@
+# =============================================================================
+# docker-compose.yml — весь стек friendship-app.
+#
+# Сервисы:
+#   postgres  — база данных (данные в именованном volume, переживают пересборку)
+#   redis     — очередь событий API→бот + FSM-сторадж + skip-пометки
+#   api       — FastAPI (uvicorn), миграции и seed при старте
+#   bot       — aiogram (webhook-режим), слушает /webhook
+#   nginx     — HTTPS-терминация (certbot), статика фронта, прокси на API
+#
+# Запуск: docker compose up -d
+# Логи:   docker compose logs -f api
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # volume postgres_data гарантирует, что данные не сгорят при пересборке.
+  # ВАЖНО: без этого volume все данные закрытого теста исчезнут при docker compose up --build.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Именованный volume — данные живут на хосте независимо от контейнера.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready встроен в образ postgres. Проверяем каждые 5 сек.
+      # depends_on condition: service_healthy — API не стартует до ready.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # appendonly yes — AOF-персистентность: события не теряются при рестарте Redis.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # API (FastAPI / uvicorn)
+  # entrypoint.sh: ждёт postgres → alembic → seed → uvicorn
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    env_file: .env
+    # Порт НЕ публикуем наружу: nginx проксирует изнутри через сеть Docker.
+    # Это закрывает API от прямого доступа снаружи — только через nginx/HTTPS.
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Бот (aiogram, webhook-режим)
+  # Не нужны миграции/seed — только читает/пишет данные через shared БД.
+  # Webhook URL настраивается через WEBHOOK_URL в .env.
+  # ---------------------------------------------------------------------------
+  bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Переопределяем CMD из Dockerfile: запускаем бот, а не uvicorn
+    command: ["python", "-m", "app.bot.main"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Nginx — HTTPS-терминация + статика фронта + reverse-proxy на API
+  #
+  # Порт 80:  редирект → 443
+  # Порт 443: TLS (certbot), статика /app → /var/www/frontend/dist,
+  #           /api/v1/ → http://api:8000
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Конфиг nginx (создаём вручную на сервере или монтируем из репо)
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Собранный фронт (после npm run build)
+      - ./frontend/dist:/var/www/frontend/dist:ro
+      # Let's Encrypt сертификаты (certbot пишет сюда)
+      - certbot_certs:/etc/letsencrypt:ro
+      # webroot для certbot ACME-challenge
+      - certbot_webroot:/var/www/certbot:ro
+    depends_on:
+      - api
+
+  # ---------------------------------------------------------------------------
+  # Certbot — получение и обновление TLS-сертификата Let's Encrypt.
+  # Запускается однократно командой (не as daemon): docker compose run certbot ...
+  # После получения сертификата этот сервис просто не стартует.
+  # Авто-обновление — через cron на хосте (см. рунбук).
+  # ---------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    # Команда задаётся при запуске, не здесь: docker compose run certbot certonly ...
+    entrypoint: ["sh", "-c", "trap exit TERM; while :; do certbot renew; sleep 12h; done"]
+    profiles:
+      # Запускается только явно: docker compose --profile certbot up certbot
+      - certbot
+
+
+# ---------------------------------------------------------------------------
+# Volumes: именованные — docker engine управляет путями на хосте.
+# КРИТИЧНО: postgres_data — без него данные сгорят при пересборке.
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  certbot_certs:
+    driver: local
+  certbot_webroot:
+    driver: local

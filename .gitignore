@@ -1,0 +1,47 @@
+# Секреты — НИКОГДА в Git
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Виртуальные окружения
+venv/
+.venv/
+env/
+
+# Тесты
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Node / фронтенд
+node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Docker
+# (docker-compose.yml и Dockerfile — коммитим, .env — нет)
+
+# Alembic (автогенерированный, но пустой файл)
+# alembic/versions/*.py — коммитим
+
+# Логи
+*.log
+logs/

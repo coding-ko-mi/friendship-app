@@ -1,29 +1,36 @@
 """
-Точка входа Telegram-бота (aiogram 3.x, режим polling).
+Точка входа Telegram-бота (aiogram 3.x, режим webhook).
 
-Запуск (из папки backend/, отдельным процессом рядом с uvicorn):
-    python -m app.bot.main
+Переключён с polling на webhook в модуле «Деплой» (handoff_7).
+Причина: HTTPS всё равно нужен для Mini App → webhook бесплатен,
+и это правильный подход для продакшна.
 
 Что делает:
   1. Создаёт Bot с дефолтным parse_mode=HTML.
-  2. FSM-сторадж — RedisStorage (общий Redis проекта), чтобы стейт регистрации
-     переживал перезапуск бота и был отделён от данных приложения по префиксу.
+  2. FSM-сторадж — RedisStorage (общий Redis проекта).
   3. Подключает роутеры (/start, приём фото).
-  4. Параллельно запускает polling и consumer событий из Redis.
+  4. Регистрирует webhook URL у Telegram.
+  5. Запускает aiohttp-сервер на WEBHOOK_PORT для приёма апдейтов.
+  6. Параллельно запускает consumer событий из Redis.
 
-Почему polling, а не webhook: проще для разработки и MVP, не требует публичного
-HTTPS-домена. Переезд на webhook — замена блока запуска ниже, остальной код
-(хендлеры, сервисы) не меняется.
+Webhook URL (из env): https://твой-домен/webhook
+nginx пробрасывает /webhook → этот aiohttp-сервер внутри Docker-сети.
+
+Возврат к polling для локальной разработки:
+  Закомментируй блок webhook и раскомментируй polling-блок внизу.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from app.bot.events_consumer import run_events_consumer
 from app.bot.handlers import registration, start
@@ -36,18 +43,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Webhook настройки из env (задаются в .env, пробрасываются через compose).
+WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")   # https://домен/webhook
+WEBHOOK_PATH: str = os.getenv("WEBHOOK_PATH", "/webhook")
+WEBHOOK_HOST: str = os.getenv("WEBHOOK_HOST", "0.0.0.0")
+WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "8080"))
+
 
 def build_dispatcher() -> Dispatcher:
     """
     Собрать Dispatcher с FSM-стораджем на Redis и подключёнными роутерами.
 
     Порядок роутеров: start первым (команда /start), затем registration
-    (приём фото в состоянии waiting_for_photo). Порядок важен только при
-    пересечении фильтров — здесь они не пересекаются, но держим логичным.
+    (приём фото в состоянии waiting_for_photo).
     """
-    # RedisStorage для FSM. Префикс по умолчанию у aiogram свой ("fsm"),
-    # данные приложения (skip-пометки, pending_photo, очередь) лежат под
-    # другими ключами — конфликта нет.
     storage = RedisStorage.from_url(REDIS_URL)
     dp = Dispatcher(storage=storage)
     dp.include_router(start.router)
@@ -55,8 +64,25 @@ def build_dispatcher() -> Dispatcher:
     return dp
 
 
-async def main() -> None:
-    """Запустить бота: polling + consumer событий одновременно."""
+async def on_startup(bot: Bot) -> None:
+    """Зарегистрировать webhook URL у Telegram при старте."""
+    if not WEBHOOK_URL:
+        raise RuntimeError(
+            "WEBHOOK_URL не задан в .env. "
+            "Формат: https://твой-домен/webhook"
+        )
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info("Webhook зарегистрирован: %s", WEBHOOK_URL)
+
+
+async def on_shutdown(bot: Bot) -> None:
+    """Снять webhook при остановке (чтобы Telegram перестал слать апдейты)."""
+    await bot.delete_webhook()
+    logger.info("Webhook снят")
+
+
+def main() -> None:
+    """Запустить бота в webhook-режиме + consumer событий."""
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN не задан. Укажите его в .env "
@@ -69,27 +95,74 @@ async def main() -> None:
     )
     dp = build_dispatcher()
 
-    # Consumer событий — фоновая задача рядом с polling-ом. Обе работают,
-    # пока жив процесс; при остановке gather отменит consumer.
-    consumer_task = asyncio.create_task(run_events_consumer(bot, redis_client))
+    # Регистрируем startup/shutdown хуки.
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
 
-    try:
-        logger.info("Бот запускается (polling)...")
-        # drop_pending_updates=True: при старте игнорируем накопившиеся апдейты,
-        # чтобы бот не «отвечал» на старые сообщения после простоя.
-        await dp.start_polling(bot, drop_pending_updates=True)
-    finally:
-        # Останавливаем consumer и корректно закрываем сессию бота.
-        consumer_task.cancel()
-        try:
-            await consumer_task
-        except asyncio.CancelledError:
-            pass
-        await bot.session.close()
+    # aiohttp-приложение для приёма webhook-запросов от Telegram.
+    app = web.Application()
+
+    # SimpleRequestHandler связывает маршрут WEBHOOK_PATH с Dispatcher.
+    # Каждый POST от Telegram на /webhook → aiogram обрабатывает как Update.
+    handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    handler.register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+
+    # Consumer событий из Redis запускается как фоновая задача aiohttp.
+    # Он стартует вместе с aiohttp-сервером через on_startup.
+    async def start_consumer(app: web.Application) -> None:
+        app["consumer_task"] = asyncio.create_task(
+            run_events_consumer(bot, redis_client)
+        )
+
+    async def stop_consumer(app: web.Application) -> None:
+        task = app.get("consumer_task")
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    app.on_startup.append(start_consumer)
+    app.on_cleanup.append(stop_consumer)
+
+    logger.info(
+        "Бот запускается (webhook mode: %s, port %s)...",
+        WEBHOOK_PATH,
+        WEBHOOK_PORT,
+    )
+    web.run_app(app, host=WEBHOOK_HOST, port=WEBHOOK_PORT)
+
+
+# ---------------------------------------------------------------------------
+# ЛОКАЛЬНАЯ РАЗРАБОТКА: polling-режим
+# Раскомментируй этот блок и закомментируй main() выше для разработки без HTTPS.
+# ---------------------------------------------------------------------------
+# async def _main_polling() -> None:
+#     bot = Bot(token=TELEGRAM_BOT_TOKEN,
+#               default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+#     dp = build_dispatcher()
+#     consumer_task = asyncio.create_task(run_events_consumer(bot, redis_client))
+#     try:
+#         await dp.start_polling(bot, drop_pending_updates=True)
+#     finally:
+#         consumer_task.cancel()
+#         try:
+#             await consumer_task
+#         except asyncio.CancelledError:
+#             pass
+#         await bot.session.close()
+#
+# if __name__ == "__main__":
+#     try:
+#         asyncio.run(_main_polling())
+#     except (KeyboardInterrupt, SystemExit):
+#         logger.info("Бот остановлен")
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен")

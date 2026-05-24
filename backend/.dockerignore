@@ -1,0 +1,33 @@
+# Секреты — никогда в образ
+.env
+*.env
+
+# Python-кэш
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Виртуальное окружение
+venv/
+.venv/
+env/
+
+# Тесты и coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Документация (не нужна в рантайме)
+*.md
+docs/
