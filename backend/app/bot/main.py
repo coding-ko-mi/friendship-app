@@ -34,7 +34,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 from app.bot.events_consumer import run_events_consumer
 from app.bot.handlers import registration, start
-from app.config import REDIS_URL, TELEGRAM_BOT_TOKEN
+from app.config import REDIS_URL, TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET
 from app.redis_client import redis_client
 
 logging.basicConfig(
@@ -71,8 +71,14 @@ async def on_startup(bot: Bot) -> None:
             "WEBHOOK_URL не задан в .env. "
             "Формат: https://твой-домен/webhook"
         )
-    await bot.set_webhook(WEBHOOK_URL)
-    logger.info("Webhook зарегистрирован: %s", WEBHOOK_URL)
+    # secret_token защищает /webhook от чужих POST'ов: Telegram эхом шлёт его
+    # в X-Telegram-Bot-Api-Secret-Token, aiogram сверяет — несовпадение → 401.
+    await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET or None)
+    logger.info(
+        "Webhook зарегистрирован: %s (secret_token=%s)",
+        WEBHOOK_URL,
+        "set" if WEBHOOK_SECRET else "DISABLED — опасно для прода",
+    )
 
 
 async def on_shutdown(bot: Bot) -> None:
@@ -104,7 +110,12 @@ def main() -> None:
 
     # SimpleRequestHandler связывает маршрут WEBHOOK_PATH с Dispatcher.
     # Каждый POST от Telegram на /webhook → aiogram обрабатывает как Update.
-    handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    # secret_token: aiogram сверит заголовок входящего POST с этой строкой.
+    # Если строка пустая — проверка отключена (так что в локалке/без WEBHOOK_SECRET
+    # всё работает). На проде WEBHOOK_SECRET обязателен — см. .env.example.
+    handler = SimpleRequestHandler(
+        dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET or None
+    )
     handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
 

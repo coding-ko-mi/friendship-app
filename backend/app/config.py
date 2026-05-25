@@ -70,6 +70,14 @@ PENDING_PHOTO_TTL_SECONDS: int = int(os.getenv("PENDING_PHOTO_TTL_SECONDS", "864
 # (uvicorn и бот) связаны без общего кода и без HTTP между ними.
 EVENTS_QUEUE_KEY: str = os.getenv("EVENTS_QUEUE_KEY", "bot:events")
 
+# Секрет для проверки подлинности webhook-апдейтов от Telegram. При setWebhook
+# отдаём его Telegram'у; Telegram возвращает его в заголовке
+# X-Telegram-Bot-Api-Secret-Token каждого апдейта — без этого заголовка любой
+# внешний POST на /webhook сможет подделать апдейт. Генерируется openssl
+# rand -hex 32 и кладётся в .env (ОБЯЗАТЕЛЬНО на проде). Если пусто —
+# secret-проверка отключается (приемлемо в локальной разработке).
+WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
+
 # --- Параметры мэтчинга (модуль «Бэкенд: мэтчинг») ---
 # Сколько дней «пропущенный» (skip) пользователь не показывается снова в ленте.
 # По истечении TTL он может снова всплыть — это намеренно: интересы и анкеты
