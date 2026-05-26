@@ -236,3 +236,94 @@ export interface AchievementsResponse {
   earned_count: number;
   total: number;
 }
+
+// ===================================================================== //
+//  МАТЧИ (список взаимных лайков)                                       //
+//  Источник: backend/app/api/v1/matches.py + schemas/matching.py        //
+// ===================================================================== //
+
+/** Карточка мэтча для экрана «Матчи». user_id — id СОБЕСЕДНИКА. */
+export interface MatchCard {
+  match_id: number;
+  user_id: number;
+  name: string;
+  age: number;
+  photo_file_id: string;
+  matched_at: string; // ISO-строка
+}
+
+// ===================================================================== //
+//  ИСТОРИЯ ЛАЙКОВ (экран «История»)                                     //
+//  Источник: backend/app/api/v1/history.py                              //
+// ===================================================================== //
+
+/** Один лайкнутый пользователь. Скипы здесь НЕ показываем (живут в Redis). */
+export interface LikedUserCard {
+  target_user_id: number;
+  name: string;
+  age: number;
+  photo_file_id: string;
+  liked_at: string; // ISO-строка
+}
+
+// ===================================================================== //
+//  КОМПАНИИ — ЛЁГКИЙ СПИСОК                                              //
+// ===================================================================== //
+
+/** Карточка компании для списка «мои компании» (без подгрузки состава). */
+export interface GroupSummary {
+  id: number;
+  name: string;
+  member_count: number;
+}
+
+// ===================================================================== //
+//  ПРОФИЛЬ (экран «Профиль»)                                             //
+//  Источник: backend/app/schemas/profile.py                              //
+// ===================================================================== //
+
+/** Интерес в составе профиля. */
+export interface ProfileInterest {
+  id: number;
+  name: string;
+}
+
+/** Пол — из enum Gender на бэке (lowercase: 'male' | 'female' | 'other'). */
+export type Gender = 'male' | 'female' | 'other';
+
+/** Ответ GET /api/v1/me/profile (полные данные владельцу). */
+export interface ProfileOwnResponse {
+  user_id: number;
+  // Поля User (правятся через бот или через PATCH с расширением).
+  name: string;
+  age: number;
+  about: string;
+  photo_file_id: string;
+  city: string;
+  // Поля Profile.
+  display_name: string | null;
+  gender: Gender | null;
+  extra_photos: string[];
+  is_visible: boolean;
+  latitude: number | null;
+  longitude: number | null;
+  // Расширение: интересы пользователя.
+  interests: ProfileInterest[];
+}
+
+/**
+ * Тело PATCH /api/v1/me/profile.
+ *
+ * Все поля опциональны (PATCH-логика). interest_ids = [] очищает все
+ * интересы; null/undefined — поле не трогаем.
+ */
+export interface ProfileUpdateRequest {
+  display_name?: string | null;
+  gender?: Gender | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  extra_photos_urls?: string[] | null;
+  is_visible?: boolean | null;
+  about?: string | null;
+  interest_ids?: number[] | null;
+}

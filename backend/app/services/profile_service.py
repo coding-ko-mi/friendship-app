@@ -9,13 +9,16 @@ ProfileService — работа с профилями.
 Profile-поля — через Mini App (FastAPI).
 """
 
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.interest import Interest, user_interests
 from app.models.profile import Profile
 from app.models.user import User
 from app.repositories.profile_repository import ProfileRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.profile import (
+    ProfileInterest,
     ProfileOwnResponse,
     ProfilePublicResponse,
     ProfileUpdateRequest,
@@ -35,12 +38,20 @@ class ProfileService:
     async def get_own_profile(self, current_user: User) -> ProfileOwnResponse:
         """Получить полный профиль текущего пользователя."""
         profile = await self._get_or_create_profile(current_user.id)
-        return self._build_own(profile, current_user)
+        interests = await self._load_user_interests(current_user.id)
+        return self._build_own(profile, current_user, interests)
 
     async def update_own_profile(
         self, current_user: User, data: ProfileUpdateRequest
     ) -> ProfileOwnResponse:
-        """PATCH профиля: обновляем только переданные поля."""
+        """
+        PATCH профиля: обновляем только переданные поля.
+
+        Profile-поля (display_name, gender, geo, is_visible, extra_photos) —
+        исторически правились здесь. User-поля about и interest_ids добавлены
+        для экрана «Профиль» Mini App: их редактирование живёт здесь же,
+        чтобы фронт делал один PATCH вместо двух.
+        """
         profile = await self._get_or_create_profile(current_user.id)
 
         update_data: dict = {}
@@ -62,9 +73,25 @@ class ProfileService:
         if update_data:
             profile = await self.profile_repo.update(profile, update_data)
 
+        # --- User-поля (about, интересы) ---
+        # about: пишем прямо в User; пустую строку валидатор схемы уже
+        # превратил в None (т.е. «не менять»).
+        if data.about is not None:
+            current_user.about = data.about
+            self.db.add(current_user)
+            await self.db.flush()
+
+        # Интересы: полная замена набора через ассоциативную таблицу.
+        # None → не трогаем; [] или [ids...] → заменяем все.
+        if data.interest_ids is not None:
+            await self._replace_user_interests(current_user.id, data.interest_ids)
+
         await self.db.commit()
         await self.db.refresh(profile)
-        return self._build_own(profile, current_user)
+        await self.db.refresh(current_user)
+
+        interests = await self._load_user_interests(current_user.id)
+        return self._build_own(profile, current_user, interests)
 
     async def get_public_profile(self, user_id: int) -> ProfilePublicResponse:
         """Публичная карточка для показа другим пользователям."""
@@ -84,6 +111,47 @@ class ProfileService:
 
     # ------------------------------------------------------------------
 
+    async def _load_user_interests(self, user_id: int) -> list[ProfileInterest]:
+        """
+        Достать интересы пользователя как (id, name).
+
+        Идём через ассоциативную таблицу user_interests → interests. Так не
+        тащим всю модель Interest целиком и не зависим от eager-загрузки
+        relationship на User.
+        """
+        stmt = (
+            select(Interest.id, Interest.name)
+            .join(user_interests, user_interests.c.interest_id == Interest.id)
+            .where(user_interests.c.user_id == user_id)
+            .order_by(Interest.id)
+        )
+        result = await self.db.execute(stmt)
+        return [ProfileInterest(id=row[0], name=row[1]) for row in result.all()]
+
+    async def _replace_user_interests(
+        self, user_id: int, new_interest_ids: list[int]
+    ) -> None:
+        """
+        Полная замена набора интересов пользователя.
+
+        Стратегия «delete + insert» по ассоциативной таблице: проще, чем
+        diff-логика, и операция редкая (раз в сессию редактирования).
+        Дубли id-шников в new_interest_ids убираем set(), несуществующие
+        id отфильтрует FK-ошибка при insert.
+        """
+        # Удаляем старые связи.
+        await self.db.execute(
+            delete(user_interests).where(user_interests.c.user_id == user_id)
+        )
+        # Вставляем новые (если есть что вставлять).
+        unique_ids = list({i for i in new_interest_ids})
+        if unique_ids:
+            await self.db.execute(
+                insert(user_interests),
+                [{"user_id": user_id, "interest_id": iid} for iid in unique_ids],
+            )
+        await self.db.flush()
+
     async def _get_or_create_profile(self, user_id: int) -> Profile:
         profile = await self.profile_repo.get_by_user_id(user_id)
         if profile is None:
@@ -91,7 +159,12 @@ class ProfileService:
             await self.db.commit()
         return profile
 
-    def _build_own(self, profile: Profile, user: User) -> ProfileOwnResponse:
+    def _build_own(
+        self,
+        profile: Profile,
+        user: User,
+        interests: list[ProfileInterest],
+    ) -> ProfileOwnResponse:
         return ProfileOwnResponse(
             user_id=user.id,
             name=user.name,
@@ -105,6 +178,7 @@ class ProfileService:
             is_visible=profile.is_visible,
             latitude=float(profile.latitude) if profile.latitude else None,
             longitude=float(profile.longitude) if profile.longitude else None,
+            interests=interests,
         )
 
     def _build_public(self, profile: Profile, user: User) -> ProfilePublicResponse:

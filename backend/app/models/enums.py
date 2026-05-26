@@ -49,3 +49,21 @@ class AchievementCode(enum.Enum):
     IRL = "IRL"                            # встреча всей компанией офлайн
     GRATITUDE = "GRATITUDE"                # отметка благодарности от человека
     SOUL = "SOUL"                          # единогласно признан главным звеном
+
+    # --- Новые достижения (итерация 2) ---
+    # Реализуются в этой итерации (механика без нового UI):
+    OPEN_HEART = "OPEN_HEART"        # поставил 10 лайков
+    POPULAR = "POPULAR"              # получил 10 лайков от других
+    CHOOSY = "CHOOSY"                # 20 скипов подряд без лайка
+    RECRUITER = "RECRUITER"          # пригласил человека, и тот принят
+    DIPLOMAT = "DIPLOMAT"            # инициатор успешного MERGE
+    MULTI_CREW = "MULTI_CREW"        # состоит в 2+ компаниях одновременно
+    UNANIMOUS = "UNANIMOUS"          # принят в компанию при 100% «за»
+    FAIR_JUDGE = "FAIR_JUDGE"        # 10 проголосованных голосований подряд
+    FAST_FRIENDS = "FAST_FRIENDS"    # первый мэтч в первые 24 часа после регистрации
+    EARLY_BIRD = "EARLY_BIRD"        # зарегистрировался в первые 30 дней после запуска
+
+    # Заведены для витрины, но механика требует нового UI/cron:
+    VETERAN = "VETERAN"              # 30 дней в компании (cron)
+    FIRST_IRL = "FIRST_IRL"          # первая офлайн-встреча (UI чек-инов)
+    CITY_EXPLORER = "CITY_EXPLORER"  # 3 раза поделился подборкой (UI шаринга)

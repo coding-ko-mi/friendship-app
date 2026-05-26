@@ -14,11 +14,20 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from redis.asyncio import Redis
 
-from app.config import DISCOVERY_PAGE_SIZE
+from app.config import (
+    CHOOSY_THRESHOLD,
+    DISCOVERY_PAGE_SIZE,
+    FAST_FRIENDS_WINDOW_HOURS,
+    OPEN_HEART_THRESHOLD,
+    POPULAR_THRESHOLD,
+)
 from app.models.enums import AchievementCode
 from app.models.user import User
+from app.repositories.achievement_counters import AchievementCounters
 from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.matching_repository import MatchingRepository
 from app.repositories.skip_repository import SkipRepository
@@ -30,6 +39,15 @@ from app.schemas.matching import (
 )
 from app.services.achievement_service import AchievementService
 from app.services.events import achievement_event, enqueue_event, match_event
+
+
+# Человекочитаемые имена достижений для пушей. Дублируем здесь, чтобы не лезть
+# в БД ради текста на каждый пуш (его и так знает витрина / справочник). Если
+# хочется централизованного источника — вынести в helper в achievement_service.
+_NAME_OPEN_HEART = "Открытое сердце"
+_NAME_POPULAR = "Популярный"
+_NAME_CHOOSY = "Разборчивый"
+_NAME_FAST_FRIENDS = "Быстрый старт"
 
 
 class MatchingError(Exception):
@@ -61,6 +79,10 @@ class MatchingService:
         self.achievement_service = achievement_service
         # Для пушей (мэтч + достижение) в events-очередь после commit.
         self.redis = redis
+        # Счётчики достижений (OPEN_HEART, POPULAR, CHOOSY) — в Redis.
+        # Состоят из одних INCR/DEL, поэтому отдельная тонкая обёртка вместо
+        # размазывания этих команд по бизнес-логике лайка/скипа.
+        self.counters = AchievementCounters(redis)
 
     # ------------------------------------------------------------------ #
     #  ЛЕНТА                                                             #
@@ -159,10 +181,35 @@ class MatchingService:
         already_liked = await self.matching_repo.like_exists(
             from_user_id=from_user.id, to_user_id=to_user_id
         )
+
+        # Счётчики достижений (OPEN_HEART/POPULAR/CHOOSY) считаем ТОЛЬКО для
+        # реально нового лайка — иначе при повторном тапе цифры дрейфовали бы.
+        # Накопленные пуши-уведомления о новых достижениях отправим ПОСЛЕ
+        # commit (контракт events.py).
+        achievement_pushes: list[tuple[int, str]] = []  # (user_id, name)
+
         if not already_liked:
             await self.matching_repo.add_like(
                 from_user_id=from_user.id, to_user_id=to_user_id
             )
+            # Лайк прерывает серию скипов (CHOOSY — это «20 подряд БЕЗ лайка»).
+            await self.counters.reset_consecutive_skips(from_user.id)
+
+            # OPEN_HEART: лайкнул столько-то людей.
+            given = await self.counters.incr_likes_given(from_user.id)
+            if given == OPEN_HEART_THRESHOLD:
+                if await self.achievement_service.grant(
+                    user_id=from_user.id, code=AchievementCode.OPEN_HEART.value
+                ):
+                    achievement_pushes.append((from_user.id, _NAME_OPEN_HEART))
+
+            # POPULAR: получатель лайка набрал столько-то входящих.
+            received = await self.counters.incr_likes_received(to_user_id)
+            if received == POPULAR_THRESHOLD:
+                if await self.achievement_service.grant(
+                    user_id=to_user_id, code=AchievementCode.POPULAR.value
+                ):
+                    achievement_pushes.append((to_user_id, _NAME_POPULAR))
 
         # Есть ли встречный лайк (target → from_user)? Если да — это мэтч.
         reciprocal = await self.matching_repo.like_exists(
@@ -172,6 +219,11 @@ class MatchingService:
         if not reciprocal:
             # Взаимности пока нет — лайк сохранён, ждём ответного шага.
             await self.matching_repo.session.commit()
+            # Пуши о достижениях за лайк/получение лайка — после commit.
+            for uid, name in achievement_pushes:
+                await enqueue_event(
+                    self.redis, achievement_event(user_id=uid, achievement_name=name)
+                )
             return LikeResult(is_mutual=False)
 
         # --- Взаимный лайк: создаём (или находим) Match ---
@@ -199,6 +251,31 @@ class MatchingService:
             code=AchievementCode.FIRST_MEETING.value,
         )
 
+        # FAST_FRIENDS — «первое знакомство в первые сутки после регистрации».
+        # Условие: это первый мэтч пользователя (FIRST_MEETING ВЫДАН ВПЕРВЫЕ
+        # этим мэтчем) И user.created_at не старше FAST_FRIENDS_WINDOW_HOURS.
+        # Проверяем для обоих участников: у каждого свой счётчик «первое».
+        fast_friends_window = timedelta(hours=FAST_FRIENDS_WINDOW_HOURS)
+        now = datetime.now(timezone.utc)
+        # Достаём собеседника-партнёра отдельно, чтобы знать его created_at;
+        # from_user уже есть как объект, target — тоже (загружен выше как target).
+        candidates_for_fast_friends: list[tuple[int, datetime]] = [
+            (from_user.id, _aware(from_user.created_at)),
+            (to_user_id, _aware(target.created_at)),
+        ]
+        fast_friends_granted: list[int] = []
+        for uid, created_at in candidates_for_fast_friends:
+            # Если FIRST_MEETING НЕ выдан впервые сейчас — у пользователя уже
+            # были мэтчи раньше, FAST_FRIENDS он упустил.
+            if uid not in first_meeting_granted:
+                continue
+            if now - created_at > fast_friends_window:
+                continue
+            if await self.achievement_service.grant(
+                user_id=uid, code=AchievementCode.FAST_FRIENDS.value
+            ):
+                fast_friends_granted.append(uid)
+
         await self.matching_repo.session.commit()
 
         # --- Пуши после commit (контракт events: только зафиксированное) ---
@@ -214,6 +291,17 @@ class MatchingService:
             await enqueue_event(
                 self.redis,
                 achievement_event(user_id=user_id, achievement_name="Первая встреча"),
+            )
+        # Пуши FAST_FRIENDS — тем, у кого выполнились оба условия.
+        for user_id in fast_friends_granted:
+            await enqueue_event(
+                self.redis,
+                achievement_event(user_id=user_id, achievement_name=_NAME_FAST_FRIENDS),
+            )
+        # Пуши OPEN_HEART / POPULAR (накопились до commit мэтча).
+        for uid, name in achievement_pushes:
+            await enqueue_event(
+                self.redis, achievement_event(user_id=uid, achievement_name=name)
             )
 
         return LikeResult(is_mutual=True, match_id=match.id)
@@ -234,4 +322,40 @@ class MatchingService:
         await self.skip_repo.add_skip(
             user_id=from_user.id, skipped_user_id=skipped_user_id
         )
+
+        # CHOOSY: серия скипов подряд без единого лайка. Счётчик в Redis;
+        # любой лайк (в handler выше) обнуляет ключ. Выдаём ровно при достижении
+        # порога (CHOOSY_THRESHOLD), повторные значения = просто скипы дальше.
+        series_len = await self.counters.incr_consecutive_skips(from_user.id)
+        if series_len == CHOOSY_THRESHOLD:
+            # Выдаём идемпотентно. grant сам сделает коммит-нейтральную вставку
+            # в текущую сессию; ниже коммит делает откатоустойчивый этой выдаче.
+            granted_first = await self.achievement_service.grant(
+                user_id=from_user.id, code=AchievementCode.CHOOSY.value
+            )
+            # skip-эндпоинт не открывает явной транзакции — flush'и
+            # AchievementRepository требуют commit на сессии. Сервис мэтчинга
+            # сам коммитит в like(); здесь — единичная вставка, которой тоже
+            # нужен коммит для фиксации.
+            await self.matching_repo.session.commit()
+            if granted_first:
+                await enqueue_event(
+                    self.redis,
+                    achievement_event(
+                        user_id=from_user.id, achievement_name=_NAME_CHOOSY
+                    ),
+                )
+
         return SkipResult(skipped_user_id=skipped_user_id)
+
+
+def _aware(dt: datetime) -> datetime:
+    """
+    Гарантировать timezone-aware datetime для сравнения с now() в UTC.
+
+    Зачем: SQLAlchemy в зависимости от конфига колонки/драйвера может вернуть
+    naive datetime (особенно при server_default=func.now()). Сравнивать naive
+    с aware Python запрещает (TypeError). Считаем naive значения как UTC —
+    это согласуется с server_default=NOW() в схеме TimestampMixin.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)

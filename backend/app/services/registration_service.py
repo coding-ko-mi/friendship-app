@@ -16,11 +16,18 @@
 """
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
+
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import EARLY_BIRD_WINDOW_DAYS, LAUNCH_DATE
+from app.models.enums import AchievementCode
+from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.registration_repository import RegistrationRepository
 from app.schemas.registration import RegistrationRequest, RegistrationResponse
+from app.services.achievement_service import AchievementService
+from app.services.events import achievement_event, enqueue_event
 
 
 # --------------------------------------------------------------------- #
@@ -102,6 +109,12 @@ class RegistrationService:
             city=data.city,
             interests=interests,
         )
+
+        # EARLY_BIRD: «один из первых» — регистрация в окне после запуска.
+        # Выдача идёт В ТУ ЖЕ транзакцию, что и создание пользователя, чтобы
+        # гарантировать атомарность. Пуш — после commit.
+        early_bird_granted = await self._maybe_grant_early_bird(user_id=user.id)
+
         await self.session.commit()
 
         # Фото больше не «ожидающее» — удаляем ключ, чтобы не висел до TTL.
@@ -109,4 +122,41 @@ class RegistrationService:
         # и человек сможет повторить регистрацию, не присылая фото снова.
         await self.redis.delete(pending_photo_key(telegram_id))
 
+        if early_bird_granted:
+            await enqueue_event(
+                self.redis,
+                achievement_event(user_id=user.id, achievement_name="Ранняя пташка"),
+            )
+
         return RegistrationResponse(id=user.id, name=user.name)
+
+    async def _maybe_grant_early_bird(self, *, user_id: int) -> bool:
+        """
+        Выдать EARLY_BIRD, если регистрация пришлась на окно после запуска.
+
+        Окно: [LAUNCH_DATE, LAUNCH_DATE + EARLY_BIRD_WINDOW_DAYS].
+
+        Парсим LAUNCH_DATE из конфига (ISO-строка). При битом значении —
+        тихо не выдаём (не блокируем регистрацию из-за опечатки в .env).
+        Возвращает True, если выдано впервые (=> повод слать пуш).
+        """
+        try:
+            launch = date.fromisoformat(LAUNCH_DATE)
+        except ValueError:
+            # Неправильный формат LAUNCH_DATE — не блокируем регистрацию.
+            return False
+
+        # Сравниваем по дате (без времени): окно — это «N дней с запуска».
+        today = datetime.now(timezone.utc).date()
+        window_end = launch + timedelta(days=EARLY_BIRD_WINDOW_DAYS)
+        if not (launch <= today <= window_end):
+            return False
+
+        # AchievementService собирается на ТОЙ ЖЕ сессии, что и репозиторий
+        # регистрации — выдача попадёт в один commit с созданием User.
+        ach_service = AchievementService(
+            achievement_repo=AchievementRepository(self.session)
+        )
+        return await ach_service.grant(
+            user_id=user_id, code=AchievementCode.EARLY_BIRD.value
+        )

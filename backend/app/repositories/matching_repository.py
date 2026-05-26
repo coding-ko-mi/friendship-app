@@ -11,7 +11,9 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import and_, func, select
+from datetime import datetime
+
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.interest import user_interests
@@ -190,3 +192,76 @@ class MatchingRepository:
     async def get_target_user(self, user_id: int) -> User | None:
         """Достать пользователя по id (проверка существования цели лайка)."""
         return await self.session.get(User, user_id)
+
+    # ------------------------------------------------------------------ #
+    #  СПИСОК МЭТЧЕЙ (экран «Матчи»)                                     #
+    # ------------------------------------------------------------------ #
+    async def list_user_matches(
+        self, user_id: int
+    ) -> list[tuple[Match, User]]:
+        """
+        Все мэтчи пользователя + второй участник пары.
+
+        Возвращает список пар (Match, other_user), отсортированных по дате
+        создания (свежие сверху). Забаненные собеседники отфильтровываются.
+
+        Запрос: JOIN matches с users — берём ту строку users, которая НЕ есть
+        текущий пользователь (через CASE в JOIN-условии).
+        """
+        # Выбираем второго участника одним запросом: для каждой строки matches
+        # подгружаем User, чей id = противоположной стороне пары.
+        other_user = User  # alias для читаемости
+        stmt = (
+            select(Match, other_user)
+            .join(
+                other_user,
+                or_(
+                    and_(Match.user_a_id == user_id, other_user.id == Match.user_b_id),
+                    and_(Match.user_b_id == user_id, other_user.id == Match.user_a_id),
+                ),
+            )
+            .where(
+                or_(Match.user_a_id == user_id, Match.user_b_id == user_id),
+                other_user.is_banned.is_(False),
+            )
+            .order_by(Match.created_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [(row[0], row[1]) for row in result.all()]
+
+    # ------------------------------------------------------------------ #
+    #  ИСТОРИЯ ЛАЙКОВ (экран «История»)                                  #
+    # ------------------------------------------------------------------ #
+    async def list_likes_from(
+        self, user_id: int
+    ) -> list[tuple[User, datetime]]:
+        """
+        Список людей, которых пользователь лайкнул, + когда поставил лайк.
+
+        Сортировка: свежие сверху. Забаненных целей не показываем — их
+        UI всё равно ничего полезного не даст.
+        """
+        stmt = (
+            select(User, Like.created_at)
+            .join(Like, Like.to_user_id == User.id)
+            .where(Like.from_user_id == user_id, User.is_banned.is_(False))
+            .order_by(Like.created_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [(row[0], row[1]) for row in result.all()]
+
+    async def delete_like(self, *, from_user_id: int, to_user_id: int) -> int:
+        """
+        Удалить лайк (используется на экране «История» — «убрать лайк»).
+
+        Возвращает число удалённых строк (0 — лайка не было).
+        Мэтч, если он есть с этим пользователем, НЕ удаляем — это отдельная
+        логика, продуктово не сводится к «отозвал лайк».
+        """
+        stmt = delete(Like).where(
+            Like.from_user_id == from_user_id, Like.to_user_id == to_user_id
+        )
+        result = await self.session.execute(stmt)
+        await self.session.flush()
+        # rowcount у delete возвращает число удалённых строк.
+        return int(result.rowcount or 0)

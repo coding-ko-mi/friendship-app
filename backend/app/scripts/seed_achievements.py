@@ -72,6 +72,73 @@ ACHIEVEMENTS: list[dict[str, str]] = [
         "name": "Душа компании",
         "description": "Компания единогласно признала тебя главным звеном.",
     },
+    # --- Новые достижения (итерация 2): механика без нового UI ---
+    {
+        "code": AchievementCode.OPEN_HEART.value,
+        "name": "Открытое сердце",
+        "description": "Открыл сердце навстречу новым людям.",
+    },
+    {
+        "code": AchievementCode.POPULAR.value,
+        "name": "Популярный",
+        "description": "Тебя заметили — сразу 10 человек проявили интерес.",
+    },
+    {
+        "code": AchievementCode.CHOOSY.value,
+        "name": "Разборчивый",
+        "description": "Стандарты высоки — 20 анкет подряд не прошли отбор.",
+    },
+    {
+        "code": AchievementCode.RECRUITER.value,
+        "name": "Вербовщик",
+        "description": "Твоё приглашение приняли — ты пополнил компанию.",
+    },
+    {
+        "code": AchievementCode.DIPLOMAT.value,
+        "name": "Дипломат",
+        "description": "Объединил две компании в одну.",
+    },
+    {
+        "code": AchievementCode.MULTI_CREW.value,
+        "name": "Свой везде",
+        "description": "В двух компаниях сразу — везде свой.",
+    },
+    {
+        "code": AchievementCode.UNANIMOUS.value,
+        "name": "Единогласие",
+        "description": "Все до одного проголосовали «за» — тебя ждали.",
+    },
+    {
+        "code": AchievementCode.FAIR_JUDGE.value,
+        "name": "Справедливый",
+        "description": "Не пропустил ни одного голосования из 10 — это ответственность.",
+    },
+    {
+        "code": AchievementCode.FAST_FRIENDS.value,
+        "name": "Быстрый старт",
+        "description": "Первое знакомство — уже в первые сутки. Отличный старт.",
+    },
+    {
+        "code": AchievementCode.EARLY_BIRD.value,
+        "name": "Ранняя пташка",
+        "description": "Один из первых. Был здесь, когда всё только начиналось.",
+    },
+    # --- Новые достижения (итерация 2): требуют отдельной механики ---
+    {
+        "code": AchievementCode.VETERAN.value,
+        "name": "Ветеран",
+        "description": "30 дней в одной компании — это уже не случайность.",
+    },
+    {
+        "code": AchievementCode.FIRST_IRL.value,
+        "name": "Первый шаг",
+        "description": "Первый раз встретились вживую — это уже настоящая компания.",
+    },
+    {
+        "code": AchievementCode.CITY_EXPLORER.value,
+        "name": "Исследователь",
+        "description": "Стал проводником для своей компании — трижды поделился идеями.",
+    },
 ]
 
 

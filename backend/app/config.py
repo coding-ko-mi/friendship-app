@@ -87,3 +87,26 @@ DISCOVERY_SKIP_TTL_DAYS: int = 14
 # Размер страницы ленты по умолчанию (сколько кандидатов отдаём за один запрос).
 # Лента подгружается порциями по мере свайпов, а не вся сразу.
 DISCOVERY_PAGE_SIZE: int = 20
+
+# --- Параметры достижений (геймификация, итерация 2) ---
+# Дата запуска продукта (ISO 8601, например "2026-06-01"). Используется для
+# EARLY_BIRD: пользователю выдаётся «Ранняя пташка», если он зарегистрировался
+# в течение EARLY_BIRD_WINDOW_DAYS дней после LAUNCH_DATE.
+# ОБЯЗАТЕЛЬНО зафиксировать в .env до первого деплоя. После — НЕ МЕНЯТЬ
+# (исторический факт, не может «переехать»).
+LAUNCH_DATE: str = os.getenv("LAUNCH_DATE", "2026-06-01")
+# Окно «ранней пташки» в днях. 30 — продуктовое решение из achievements_spec.md.
+EARLY_BIRD_WINDOW_DAYS: int = int(os.getenv("EARLY_BIRD_WINDOW_DAYS", "30"))
+
+# Пороги счётчиков-достижений. Меняются через .env без правки кода.
+# OPEN_HEART — поставил столько лайков; POPULAR — получил столько лайков;
+# CHOOSY — скипнул столько подряд без лайка; FAIR_JUDGE — проголосовал столько
+# раз подряд (без пропуска заявок, которые мог проголосовать).
+OPEN_HEART_THRESHOLD: int = int(os.getenv("OPEN_HEART_THRESHOLD", "10"))
+POPULAR_THRESHOLD: int = int(os.getenv("POPULAR_THRESHOLD", "10"))
+CHOOSY_THRESHOLD: int = int(os.getenv("CHOOSY_THRESHOLD", "20"))
+FAIR_JUDGE_THRESHOLD: int = int(os.getenv("FAIR_JUDGE_THRESHOLD", "10"))
+
+# Окно «быстрого старта»: за сколько часов от регистрации первый мэтч ещё
+# считается «ранним» (FAST_FRIENDS).
+FAST_FRIENDS_WINDOW_HOURS: int = int(os.getenv("FAST_FRIENDS_WINDOW_HOURS", "24"))

@@ -5,9 +5,15 @@
  * Стек экранов в состоянии переносится на React Native один-в-один (там
  * тоже навигация стеком, без адресной строки). Веб-специфики здесь нет.
  *
- * Реализация — useReducer со стеком экранов: push кладёт экран наверх,
- * back снимает верхний, replace меняет текущий (для необратимых переходов
- * вроде «онбординг завершён → лента», куда возвращаться нельзя).
+ * Модель состояния: rootScreen + overlay-стек.
+ *   • rootScreen — текущая «вкладка» Tab Bar (или экран бутстрапа: loading,
+ *     onboarding, error). Меняется через setRoot/reset.
+ *   • stack[] — overlay-стек ПОВЕРХ root (например, GroupScreen, открытый
+ *     из «Матчи»). push/back работают со стеком; смена вкладки в Tab Bar
+ *     очищает стек.
+ *
+ * Активный экран = верх стека, если стек непуст; иначе rootScreen.
+ * canGoBack = stack.length > 0 (root всегда «снизу», от него не уходим назад).
  */
 import { useCallback, useReducer } from 'react';
 
@@ -15,8 +21,12 @@ import { useCallback, useReducer } from 'react';
 export type ScreenName =
   | 'loading' // бутстрап: идёт авторизация
   | 'onboarding' // регистрация (анкета)
-  | 'feed' // лента подбора
-  | 'group' // карточка компании + голосование
+  | 'feed' // лента подбора (Tab Bar)
+  | 'matches' // список мэтчей и компаний (Tab Bar)
+  | 'history' // история лайков (Tab Bar)
+  | 'achievements' // витрина достижений (Tab Bar)
+  | 'profile' // профиль (Tab Bar)
+  | 'group' // карточка компании + голосование (overlay)
   | 'error'; // фатальная ошибка (нет Telegram и т.п.)
 
 /** Состояние одного экрана: имя + произвольные параметры. */
@@ -28,28 +38,42 @@ export interface ScreenState {
 }
 
 interface RouterState {
-  stack: ScreenState[]; // непустой стек; верхний элемент — активный экран
+  root: ScreenState; // текущая вкладка / стартовый экран
+  stack: ScreenState[]; // overlay-стек поверх root (может быть пуст)
 }
 
 type RouterAction =
   | { type: 'push'; screen: ScreenState }
   | { type: 'replace'; screen: ScreenState }
   | { type: 'back' }
-  | { type: 'reset'; screen: ScreenState };
+  | { type: 'reset'; screen: ScreenState }
+  | { type: 'setRoot'; screen: ScreenState };
 
 function reducer(state: RouterState, action: RouterAction): RouterState {
   switch (action.type) {
     case 'push':
-      return { stack: [...state.stack, action.screen] };
+      return { ...state, stack: [...state.stack, action.screen] };
     case 'replace':
-      return { stack: [...state.stack.slice(0, -1), action.screen] };
+      // Если стек непуст — меняем верх стека, иначе меняем сам root.
+      if (state.stack.length > 0) {
+        return {
+          ...state,
+          stack: [...state.stack.slice(0, -1), action.screen],
+        };
+      }
+      return { ...state, root: action.screen };
     case 'back':
-      // Не даём опустошить стек: если экран один — остаёмся на нём.
-      return state.stack.length > 1
-        ? { stack: state.stack.slice(0, -1) }
+      // Из стека снимаем верх; если стек уже пуст — остаёмся на root.
+      return state.stack.length > 0
+        ? { ...state, stack: state.stack.slice(0, -1) }
         : state;
     case 'reset':
-      return { stack: [action.screen] };
+      // Полный сброс: новый root, стек пуст.
+      return { root: action.screen, stack: [] };
+    case 'setRoot':
+      // Смена вкладки Tab Bar: меняем root, стек очищаем (overlay-экраны,
+      // открытые из старой вкладки, не должны переезжать на новую).
+      return { root: action.screen, stack: [] };
     default:
       return state;
   }
@@ -58,16 +82,24 @@ function reducer(state: RouterState, action: RouterAction): RouterState {
 /** Публичный API роутера, который получают экраны. */
 export interface Router {
   current: ScreenState;
+  /** Текущий root (вкладка) — нужен Tab Bar, чтобы подсветить активный таб. */
+  root: ScreenState;
   canGoBack: boolean;
   push: (name: ScreenName, params?: Record<string, unknown>) => void;
   replace: (name: ScreenName, params?: Record<string, unknown>) => void;
+  /** Полный сброс (бутстрап). Используется при первом входе и в onboarding. */
   reset: (name: ScreenName, params?: Record<string, unknown>) => void;
+  /** Сменить вкладку (Tab Bar): новый root, overlay-стек очищается. */
+  setRoot: (name: ScreenName, params?: Record<string, unknown>) => void;
   back: () => void;
 }
 
 /** Хук-роутер. initial — стартовый экран (обычно 'loading'). */
 export function useRouter(initial: ScreenName): Router {
-  const [state, dispatch] = useReducer(reducer, { stack: [{ name: initial }] });
+  const [state, dispatch] = useReducer(reducer, {
+    root: { name: initial },
+    stack: [],
+  });
 
   const push = useCallback((name: ScreenName, params?: Record<string, unknown>) => {
     dispatch({ type: 'push', screen: { name, params } });
@@ -81,14 +113,23 @@ export function useRouter(initial: ScreenName): Router {
     dispatch({ type: 'reset', screen: { name, params } });
   }, []);
 
+  const setRoot = useCallback((name: ScreenName, params?: Record<string, unknown>) => {
+    dispatch({ type: 'setRoot', screen: { name, params } });
+  }, []);
+
   const back = useCallback(() => dispatch({ type: 'back' }), []);
 
+  const current =
+    state.stack.length > 0 ? state.stack[state.stack.length - 1] : state.root;
+
   return {
-    current: state.stack[state.stack.length - 1],
-    canGoBack: state.stack.length > 1,
+    current,
+    root: state.root,
+    canGoBack: state.stack.length > 0,
     push,
     replace,
     reset,
+    setRoot,
     back,
   };
 }

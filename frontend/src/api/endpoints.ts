@@ -12,8 +12,13 @@ import type {
   DiscoveryFeed,
   GroupCard,
   GroupCreate,
+  GroupSummary,
   Interest,
   LikeResult,
+  LikedUserCard,
+  MatchCard,
+  ProfileOwnResponse,
+  ProfileUpdateRequest,
   RegistrationRequest,
   RegistrationResponse,
   RequestCard,
@@ -89,6 +94,11 @@ export const discoveryApi = {
 //  КОМПАНИИ + ГОЛОСОВАНИЕ (groups_router.py)                            //
 // --------------------------------------------------------------------- //
 export const groupsApi = {
+  /** Мои компании (где состою как участник). Лёгкий список без состава. */
+  listMine(): Promise<GroupSummary[]> {
+    return request(p('/groups'));
+  },
+
   /** Создать компанию из подтверждённого мэтча. */
   create(body: GroupCreate): Promise<GroupCard> {
     return request(p('/groups'), { method: 'POST', body });
@@ -130,6 +140,46 @@ export const achievementsApi = {
   /** Витрина достижений текущего пользователя (весь справочник + прогресс). */
   getMine(): Promise<AchievementsResponse> {
     return request(p('/me/achievements'));
+  },
+};
+
+// --------------------------------------------------------------------- //
+//  МАТЧИ (matches.py)                                                   //
+// --------------------------------------------------------------------- //
+export const matchesApi = {
+  /** Все мэтчи текущего пользователя (свежие сверху). */
+  list(): Promise<MatchCard[]> {
+    return request(p('/matches'));
+  },
+};
+
+// --------------------------------------------------------------------- //
+//  ИСТОРИЯ ЛАЙКОВ (history.py)                                          //
+// --------------------------------------------------------------------- //
+export const historyApi = {
+  /** Список лайкнутых текущим пользователем (свежие сверху). */
+  list(): Promise<LikedUserCard[]> {
+    return request(p('/history'));
+  },
+
+  /** Убрать лайк (мэтч, если был, НЕ удаляется — это отдельная сущность). */
+  remove(targetUserId: number): Promise<void> {
+    return request(p(`/history/${targetUserId}`), { method: 'DELETE' });
+  },
+};
+
+// --------------------------------------------------------------------- //
+//  ПРОФИЛЬ (profiles.py)                                                //
+// --------------------------------------------------------------------- //
+export const profileApi = {
+  /** Свой полный профиль. */
+  getMine(): Promise<ProfileOwnResponse> {
+    return request(p('/me/profile'));
+  },
+
+  /** PATCH полей профиля. Передавать только то, что меняется. */
+  updateMine(body: ProfileUpdateRequest): Promise<ProfileOwnResponse> {
+    return request(p('/me/profile'), { method: 'PATCH', body });
   },
 };
 

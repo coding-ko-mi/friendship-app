@@ -14,14 +14,32 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.models.profile import Gender
 
 
+class ProfileInterest(BaseModel):
+    """Карточка интереса в составе профиля (id + название)."""
+    id: int
+    name: str
+
+
 class ProfileUpdateRequest(BaseModel):
-    """Обновление полей Profile. Все поля опциональны (PATCH-логика)."""
+    """
+    PATCH профиля. Все поля опциональны.
+
+    Часть полей живёт на User (about, interests) — исторически их меняли
+    через Telegram-бот. Mini App теперь тоже может их редактировать
+    (экран «Профиль» в Tab Bar), поэтому добавлены здесь.
+    """
     display_name: str | None = None
     gender: Gender | None = None
     latitude: float | None = None
     longitude: float | None = None
     extra_photos_urls: list[str] | None = None
     is_visible: bool | None = None
+    # Поля User, редактируемые через Mini App:
+    # about — текст «о себе» (Text NOT NULL в БД, пустую строку отвергаем).
+    about: str | None = None
+    # interest_ids — полная замена списка интересов (как при регистрации).
+    # None → не меняем; [] → очистить все интересы; [1,2,3] → выставить эти.
+    interest_ids: list[int] | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -33,6 +51,20 @@ class ProfileUpdateRequest(BaseModel):
             raise ValueError("Минимум 2 символа")
         if len(v) > 64:
             raise ValueError("Максимум 64 символа")
+        return v
+
+    @field_validator("about")
+    @classmethod
+    def validate_about(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        # about — NOT NULL в БД. Пустую строку трактуем как «не передано»
+        # (PATCH: не редактируем поле), а не как валидное значение.
+        if len(v) < 1:
+            return None
+        if len(v) > 2000:
+            raise ValueError("О себе — максимум 2000 символов")
         return v
 
     @field_validator("extra_photos_urls")
@@ -76,6 +108,8 @@ class ProfileOwnResponse(BaseModel):
     # Координаты — только себе (другим округляем)
     latitude: float | None
     longitude: float | None
+    # Интересы пользователя (id + название). Заполняются сервисом из User.interests.
+    interests: list[ProfileInterest] = []
 
 
 class ProfilePublicResponse(BaseModel):

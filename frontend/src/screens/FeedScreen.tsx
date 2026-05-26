@@ -21,9 +21,15 @@ import type { Router } from '../store/router';
 
 interface FeedScreenProps {
   router: Router;
+  /**
+   * Колбэк «случился взаимный лайк». App.tsx инкрементирует по нему бэдж
+   * новых мэтчей на вкладке «Матчи». Опционален, чтобы FeedScreen
+   * оставался самостоятельным экраном вне Tab Bar (тесты/превью).
+   */
+  onNewMatch?: () => void;
 }
 
-export function FeedScreen({ router }: FeedScreenProps) {
+export function FeedScreen({ router, onNewMatch }: FeedScreenProps) {
   // Очередь видимых кандидатов (верхний — текущий).
   const [queue, setQueue] = useState<CandidateCard[]>([]);
   const [cursor, setCursor] = useState<number | undefined>(undefined);
@@ -73,6 +79,8 @@ export function FeedScreen({ router }: FeedScreenProps) {
       const result: LikeResult = await discoveryApi.like(candidate.id);
       if (result.is_mutual && result.match_id !== null) {
         setMatch({ candidate, matchId: result.match_id });
+        // Сообщаем App.tsx: на вкладке «Матчи» нужно показать бэдж.
+        onNewMatch?.();
       }
     } catch {
       // Лайк идемпотентен на бэке; молча игнорируем сетевую ошибку,

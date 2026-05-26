@@ -73,6 +73,34 @@ class GroupRepository:
         result = await self.session.execute(stmt)
         return int(result.scalar_one())
 
+    async def list_groups_of_user(self, user_id: int) -> list[tuple[Group, int]]:
+        """
+        Все компании, в которых состоит пользователь, + размер каждой.
+
+        Для экрана «Матчи → Компании»: достаточно лёгкого списка
+        (id, name, member_count). Возвращаем пары (Group, member_count),
+        чтобы избежать N+1 при подсчёте состава отдельным запросом.
+        """
+        # Подзапрос: количество участников по каждой компании.
+        member_count_subq = (
+            select(
+                GroupMember.group_id.label("gid"),
+                func.count(GroupMember.user_id).label("cnt"),
+            )
+            .group_by(GroupMember.group_id)
+            .subquery()
+        )
+
+        stmt = (
+            select(Group, func.coalesce(member_count_subq.c.cnt, 0))
+            .join(GroupMember, GroupMember.group_id == Group.id)
+            .outerjoin(member_count_subq, member_count_subq.c.gid == Group.id)
+            .where(GroupMember.user_id == user_id)
+            .order_by(Group.id.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [(row[0], int(row[1])) for row in result.all()]
+
     async def get_members(self, group_id: int) -> list[User]:
         """Участники компании как объекты User (для карточки состава)."""
         stmt = (

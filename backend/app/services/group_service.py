@@ -25,9 +25,10 @@ import math
 
 from redis.asyncio import Redis
 
-from app.config import FULL_HOUSE_SIZE, MAX_GROUP_SIZE
+from app.config import FAIR_JUDGE_THRESHOLD, FULL_HOUSE_SIZE, MAX_GROUP_SIZE
 from app.models.enums import AchievementCode, RequestStatus, RequestType
 from app.models.user import User
+from app.repositories.achievement_counters import AchievementCounters
 from app.repositories.group_repository import GroupRepository
 from app.schemas.groups import (
     GroupCard,
@@ -38,6 +39,14 @@ from app.schemas.groups import (
 )
 from app.services.achievement_service import AchievementService
 from app.services.events import achievement_event, enqueue_event, vote_result_event
+
+
+# Человекочитаемые имена достижений для пушей (см. комментарий в matching_service).
+_NAME_RECRUITER = "Вербовщик"
+_NAME_DIPLOMAT = "Дипломат"
+_NAME_MULTI_CREW = "Свой везде"
+_NAME_UNANIMOUS = "Единогласие"
+_NAME_FAIR_JUDGE = "Справедливый"
 
 
 # --------------------------------------------------------------------- #
@@ -79,6 +88,9 @@ class GroupService:
         self.achievement_service = achievement_service
         # Redis нужен только чтобы класть пуши в events-очередь ПОСЛЕ commit.
         self.redis = redis
+        # Счётчики достижений + хранение инициатора заявки (RECRUITER/DIPLOMAT)
+        # и счётчика голосов (FAIR_JUDGE). Тонкая обёртка над Redis.
+        self.counters = AchievementCounters(redis)
 
     # ================================================================== #
     #  ВСПОМОГАТЕЛЬНОЕ                                                    #
@@ -337,6 +349,12 @@ class GroupService:
             subject_user_id=subject_user_id,
         )
         await self.group_repo.session.commit()
+        # Для INVITE запомнить инициатора в Redis: при ACCEPTED ему выдастся
+        # RECRUITER. Для JOIN это не нужно (инициатор = сам subject).
+        if type_ is RequestType.INVITE:
+            await self.counters.set_request_initiator(
+                request_id=request.id, user_id=current_user.id
+            )
         return await self.get_request_card(request.id)
 
     async def _create_merge_request(
@@ -387,6 +405,10 @@ class GroupService:
             subject_group_id=subject_group_id,
         )
         await self.group_repo.session.commit()
+        # Инициатор MERGE — кандидат на DIPLOMAT, если слияние пройдёт.
+        await self.counters.set_request_initiator(
+            request_id=request.id, user_id=current_user.id
+        )
         return await self.get_request_card(request.id)
 
     # ================================================================== #
@@ -447,6 +469,14 @@ class GroupService:
             achievement_pushes = await self._grant_group_threshold_achievements(
                 request.target_group_id
             )
+            # Достижения, зависящие от типа принятой заявки:
+            #   • RECRUITER  — для INVITE (инициатору)
+            #   • DIPLOMAT   — для MERGE  (инициатору)
+            #   • MULTI_CREW — добавленному, если он теперь в 2+ компаниях
+            #   • UNANIMOUS  — принятому, если голосование было 100% «за»
+            achievement_pushes += await self._grant_request_outcome_achievements(
+                request, result
+            )
 
         await self.group_repo.session.commit()
 
@@ -454,7 +484,100 @@ class GroupService:
         await self._push_achievements(achievement_pushes)
         await self._push_vote_result(request, result)
 
+        # FAIR_JUDGE — счётчик голосований голосующего. Считаем здесь, после
+        # commit основного состояния: даже если выдача FAIR_JUDGE упадёт, голос
+        # уже учтён в БД. Сам счётчик в Redis, поэтому транзакции не делит.
+        await self._maybe_grant_fair_judge(current_user.id)
+
         return result
+
+    async def _grant_request_outcome_achievements(
+        self, request, result: VoteResult
+    ) -> list[tuple[int, str]]:
+        """
+        Выдать достижения, зависящие от типа и итога принятой заявки.
+
+        Возвращает накопленные (user_id, name) для пушей. Идёт в ТУ ЖЕ
+        транзакцию, что и принятие заявки.
+
+        Учитываемые случаи:
+          INVITE → RECRUITER (инициатору), MULTI_CREW (принятому если >= 2 групп),
+                   UNANIMOUS (принятому если голосование 100%);
+          JOIN   → MULTI_CREW (принятому если >= 2 групп),
+                   UNANIMOUS (принятому если 100%);
+          MERGE  → DIPLOMAT (инициатору).
+        """
+        pushes: list[tuple[int, str]] = []
+
+        if request.type is RequestType.INVITE:
+            # RECRUITER инициатору приглашения (если знаем кто это — лежит в Redis).
+            initiator_id = await self.counters.get_request_initiator(request.id)
+            if initiator_id is not None:
+                if await self.achievement_service.grant(
+                    user_id=initiator_id, code=AchievementCode.RECRUITER.value
+                ):
+                    pushes.append((initiator_id, _NAME_RECRUITER))
+
+        if request.type is RequestType.MERGE:
+            # DIPLOMAT инициатору слияния.
+            initiator_id = await self.counters.get_request_initiator(request.id)
+            if initiator_id is not None:
+                if await self.achievement_service.grant(
+                    user_id=initiator_id, code=AchievementCode.DIPLOMAT.value
+                ):
+                    pushes.append((initiator_id, _NAME_DIPLOMAT))
+
+        # MULTI_CREW и UNANIMOUS — про человека, которого приняли. Только для
+        # JOIN/INVITE (у MERGE нет одного «принятого» человека).
+        if request.type in (RequestType.JOIN, RequestType.INVITE):
+            added_user_id = result.added_user_id
+            if added_user_id is not None:
+                # MULTI_CREW: добавленный теперь состоит в N >= 2 компаниях.
+                # Используем существующий метод репозитория list_groups_of_user.
+                pairs = await self.group_repo.list_groups_of_user(added_user_id)
+                if len(pairs) >= 2:
+                    if await self.achievement_service.grant(
+                        user_id=added_user_id, code=AchievementCode.MULTI_CREW.value
+                    ):
+                        pushes.append((added_user_id, _NAME_MULTI_CREW))
+
+                # UNANIMOUS: 100% голосов «за» в той (единственной) компании,
+                # которая принимала решение. Считаем по реально поданным голосам:
+                # все они «за» и их столько же, сколько участников компании.
+                member_ids = await self.group_repo.get_member_ids(
+                    request.target_group_id
+                )
+                yes, no = await self.group_repo.count_votes(
+                    request_id=request.id, voter_ids=member_ids
+                )
+                if no == 0 and yes == len(member_ids) and yes > 0:
+                    if await self.achievement_service.grant(
+                        user_id=added_user_id,
+                        code=AchievementCode.UNANIMOUS.value,
+                    ):
+                        pushes.append((added_user_id, _NAME_UNANIMOUS))
+
+        return pushes
+
+    async def _maybe_grant_fair_judge(self, voter_id: int) -> None:
+        """
+        Выдать FAIR_JUDGE при достижении порога голосов.
+
+        Счётчик в Redis — INCR каждый поданный голос. Достижение выдаём ровно
+        при попадании на FAIR_JUDGE_THRESHOLD (повторно при кратных значениях
+        не выдаём — у нас есть лишь одно «Справедливый»).
+        """
+        votes = await self.counters.incr_votes_cast(voter_id)
+        if votes != FAIR_JUDGE_THRESHOLD:
+            return
+        if await self.achievement_service.grant(
+            user_id=voter_id, code=AchievementCode.FAIR_JUDGE.value
+        ):
+            await self.group_repo.session.commit()
+            await enqueue_event(
+                self.redis,
+                achievement_event(user_id=voter_id, achievement_name=_NAME_FAIR_JUDGE),
+            )
 
     async def _push_vote_result(self, request, result: VoteResult) -> None:
         """

@@ -31,7 +31,14 @@ from app.models.user import User
 from app.redis_client import get_redis
 from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.group_repository import GroupRepository
-from app.schemas.groups import GroupCard, GroupCreate, RequestCard, RequestCreate, VoteResult
+from app.schemas.groups import (
+    GroupCard,
+    GroupCreate,
+    GroupSummary,
+    RequestCard,
+    RequestCreate,
+    VoteResult,
+)
 from app.services.achievement_service import AchievementService
 from app.services.group_service import (
     ConflictError,
@@ -92,6 +99,23 @@ def _to_http(error: Exception) -> HTTPException:
 # ===================================================================== #
 #  КОМПАНИИ                                                             #
 # ===================================================================== #
+@groups_router.get("", response_model=list[GroupSummary])
+async def list_my_groups(
+    current_user: User = Depends(get_current_user),
+    service: GroupService = Depends(get_group_service),
+) -> list[GroupSummary]:
+    """
+    Компании текущего пользователя (для экрана «Матчи → Компании»).
+
+    Лёгкий список без подгрузки состава. Детальная карточка с участниками
+    открывается отдельным GET /groups/{id} при тапе.
+    """
+    pairs = await service.group_repo.list_groups_of_user(current_user.id)
+    return [
+        GroupSummary(id=g.id, name=g.name, member_count=cnt) for g, cnt in pairs
+    ]
+
+
 @groups_router.post("", response_model=GroupCard, status_code=status.HTTP_201_CREATED)
 async def create_group(
     payload: GroupCreate,

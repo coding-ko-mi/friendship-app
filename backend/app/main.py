@@ -17,7 +17,9 @@ from app.api.v1 import (
     auth,
     discovery,
     groups,
+    history,
     interests,
+    matches,
     photo,
     profiles,
     questionnaire,
@@ -47,6 +49,10 @@ app.include_router(registration.router, prefix="/api/v1")
 app.include_router(interests.router, prefix="/api/v1")
 # Прокси Telegram-фото по file_id (для <img> в Mini App).
 app.include_router(photo.router, prefix="/api/v1")
+# Список мэтчей текущего пользователя (экран «Матчи»).
+app.include_router(matches.router, prefix="/api/v1")
+# История лайков + откат лайка (экран «История»).
+app.include_router(history.router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])

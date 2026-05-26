@@ -6,6 +6,8 @@ Pydantic-схемы модуля «Мэтчинг».
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -61,3 +63,39 @@ class SkipResult(BaseModel):
     """Результат skip: подтверждение, что кандидат убран из ленты на время TTL."""
 
     skipped_user_id: int
+
+
+# ===================================================================== #
+#  МЭТЧИ (список взаимных лайков)                                        #
+# ===================================================================== #
+class MatchCard(BaseModel):
+    """
+    Карточка одного мэтча для экрана «Матчи».
+
+    user_id — id СОБЕСЕДНИКА (второго участника пары, не текущего).
+    matched_at — когда был создан мэтч (для сортировки/отображения).
+    """
+
+    match_id: int
+    user_id: int
+    name: str
+    age: int
+    photo_file_id: str
+    matched_at: datetime
+
+
+# ===================================================================== #
+#  ИСТОРИЯ ЛАЙКОВ                                                        #
+# ===================================================================== #
+class LikedUserCard(BaseModel):
+    """
+    Карточка одного лайкнутого пользователя для экрана «История».
+
+    Скипы храним в Redis (TTL) — здесь только лайки из таблицы likes.
+    """
+
+    target_user_id: int
+    name: str
+    age: int
+    photo_file_id: str
+    liked_at: datetime
