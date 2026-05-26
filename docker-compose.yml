@@ -76,7 +76,12 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      # Используем python вместо curl: slim-образ python не содержит curl
+      # по умолчанию, из-за чего healthcheck всегда падал и бот не стартовал
+      # (он зависит от healthy api). Python есть в образе гарантированно.
+      test:
+        - "CMD-SHELL"
+        - "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/health\",timeout=3).status==200 else 1)'"
       interval: 15s
       timeout: 5s
       retries: 3
