@@ -53,7 +53,12 @@ async def list_my_history(
 
 
 @router.delete(
-    "/history/{target_user_id}", status_code=status.HTTP_204_NO_CONTENT
+    "/history/{target_user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    # 204 No Content: FastAPI запрещает указывать response_model для статусов
+    # без тела ответа. Без явного response_model=None он инферит NoneType из
+    # `-> None` annotation и падает с AssertionError при сборке роутера.
+    response_model=None,
 )
 async def delete_like(
     target_user_id: int,
