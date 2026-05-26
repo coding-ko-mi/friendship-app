@@ -76,7 +76,7 @@ export function BottomTabBar({
       })}
 
       {/* Локальные стили компонента, чтобы не плодить классы в index.css.
-          Все цвета — через --tg-theme-*/--app-* переменные. */}
+          Все цвета — через --tg-theme-... и --app-... переменные. */}
       <style>{`
         .app-tabbar {
           position: fixed;
