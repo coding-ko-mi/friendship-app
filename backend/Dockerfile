@@ -41,6 +41,11 @@ COPY --from=builder /install /usr/local
 # .dockerignore должен исключать: .env, __pycache__, .git, dist, node_modules.
 COPY . .
 
+# Гарантируем, что entrypoint.sh исполняемый. Файл добавляли в репозиторий
+# с Windows-машины (NTFS не знает unix-бита +x) — без этого chmod контейнер
+# падает с "permission denied" на entrypoint.sh при старте.
+RUN chmod +x /app/entrypoint.sh
+
 # Меняем владельца файлов на appuser — не root.
 RUN chown -R appuser:appuser /app
 
