@@ -126,10 +126,13 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       # Собранный фронт (после npm run build)
       - ./frontend/dist:/var/www/frontend/dist:ro
-      # Let's Encrypt сертификаты (certbot пишет сюда)
-      - certbot_certs:/etc/letsencrypt:ro
-      # webroot для certbot ACME-challenge
-      - certbot_webroot:/var/www/certbot:ro
+      # Let's Encrypt сертификаты: бинд-маунт с хоста, где их пишет certbot
+      # standalone (по рунбуку шаг 7). Раньше здесь был именованный volume
+      # certbot_certs — при `--force-recreate nginx` он становился пустым,
+      # и nginx падал на старте: `cannot load certificate`. Бинд-маунт стабилен.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # webroot для certbot ACME-challenge (для обновления через nginx)
+      - /var/www/certbot:/var/www/certbot:ro
     depends_on:
       - api
 
