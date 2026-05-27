@@ -223,6 +223,7 @@ export interface AchievementCard {
   code: string;
   name: string;
   description: string;
+  icon: string;
   earned: boolean;
   earned_at: string | null;
 }
@@ -290,6 +291,31 @@ export interface ProfileInterest {
 
 /** Пол — из enum Gender на бэке (lowercase: 'male' | 'female' | 'other'). */
 export type Gender = 'male' | 'female' | 'other';
+
+/**
+ * Заработанное достижение для публичной анкеты (только полученные).
+ * icon — эмодзи; description — для тултипа при тапе.
+ */
+export interface EarnedAchievement {
+  code: string;
+  name: string;
+  description: string;
+  icon: string;
+}
+
+/** Ответ GET /api/v1/users/{user_id}/profile (публичная карточка). */
+export interface ProfilePublicResponse {
+  user_id: number;
+  name: string;
+  age: number;
+  about: string;
+  city: string;
+  photo_file_id: string;
+  display_name: string | null;
+  gender: Gender | null;
+  extra_photos: string[];
+  achievements: EarnedAchievement[];
+}
 
 /** Ответ GET /api/v1/me/profile (полные данные владельцу). */
 export interface ProfileOwnResponse {

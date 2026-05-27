@@ -18,6 +18,7 @@ import type {
   LikedUserCard,
   MatchCard,
   ProfileOwnResponse,
+  ProfilePublicResponse,
   ProfileUpdateRequest,
   RegistrationRequest,
   RegistrationResponse,
@@ -180,6 +181,16 @@ export const profileApi = {
   /** PATCH полей профиля. Передавать только то, что меняется. */
   updateMine(body: ProfileUpdateRequest): Promise<ProfileOwnResponse> {
     return request(p('/me/profile'), { method: 'PATCH', body });
+  },
+
+  /** Полное удаление аккаунта. Необратимо. */
+  deleteMine(): Promise<void> {
+    return request(p('/me'), { method: 'DELETE' });
+  },
+
+  /** Публичная карточка другого пользователя (включая заработанные достижения). */
+  getPublic(userId: number): Promise<ProfilePublicResponse> {
+    return request(p(`/users/${userId}/profile`));
   },
 };
 

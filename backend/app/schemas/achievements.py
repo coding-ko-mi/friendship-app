@@ -28,8 +28,26 @@ class AchievementCard(BaseModel):
     code: str
     name: str
     description: str
+    icon: str
     earned: bool
     earned_at: datetime | None = None
+
+
+class EarnedAchievement(BaseModel):
+    """
+    Заработанное достижение для публичной анкеты (без флага earned).
+
+    Показывается в карточке кандидата в ленте: иконка + название + описание
+    в тултипе. Только полученные — недостигнутые в чужой анкете не показываем,
+    чтобы не «спойлить» прогресс другого человека.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    code: str
+    name: str
+    description: str
+    icon: str
 
 
 class AchievementsResponse(BaseModel):

@@ -1,11 +1,13 @@
 """Profile router."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.database import get_session
 from app.models.user import User
+from app.redis_client import get_redis
 from app.schemas.profile import ProfileOwnResponse, ProfilePublicResponse, ProfileUpdateRequest
 from app.services.profile_service import ProfileNotFoundError, ProfileService
 
@@ -37,6 +39,25 @@ async def update_my_profile(
     Поля name, age, about, city меняются через Telegram-бота, не здесь.
     """
     return await service.update_own_profile(current_user, body)
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_my_account(
+    current_user: User = Depends(get_current_user),
+    service: ProfileService = Depends(_get_service),
+    redis: Redis = Depends(get_redis),
+) -> Response:
+    """
+    Полное удаление своего аккаунта.
+
+    Удаляет пользователя из БД (CASCADE снимет все связанные данные:
+    лайки, мэтчи, голоса, членства, заявки, достижения, интересы, профиль,
+    анкету). Компании, где он был единственным участником, удаляются вместе
+    с ним. Эфемерные данные пользователя в Redis (skip-набор, счётчики
+    достижений) тоже очищаются. Действие необратимо.
+    """
+    await service.delete_account(current_user, redis)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/users/{user_id}/profile", response_model=ProfilePublicResponse)

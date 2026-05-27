@@ -14,6 +14,7 @@ from fastapi import FastAPI
 
 from app.api.v1 import (
     achievements,
+    admin,
     auth,
     discovery,
     groups,
@@ -53,6 +54,8 @@ app.include_router(photo.router, prefix="/api/v1")
 app.include_router(matches.router, prefix="/api/v1")
 # История лайков + откат лайка (экран «История»).
 app.include_router(history.router, prefix="/api/v1")
+# Админ-метрики (доступ только для ADMIN_TELEGRAM_ID).
+app.include_router(admin.router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])

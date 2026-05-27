@@ -35,140 +35,177 @@ ACHIEVEMENTS: list[dict[str, str]] = [
         "code": AchievementCode.FOUNDER.value,
         "name": "Основатель",
         "description": "Заложил начало компании.",
+        "icon": "🏛️",
     },
     {
         "code": AchievementCode.FIRST_MEETING.value,
         "name": "Первая встреча",
         "description": "Состоялось первое взаимное знакомство.",
+        "icon": "🤝",
     },
     {
         "code": AchievementCode.NO_BORDERS.value,
         "name": "Без границ",
         "description": "В компании собрались люди из разных городов.",
+        "icon": "🌍",
     },
     {
         "code": AchievementCode.FULL_HOUSE.value,
         "name": "Полный состав",
         "description": "Компания собрала полный состав участников.",
+        "icon": "🏠",
     },
     # --- Ниже — заведены для витрины, выдача появится позже ---
     {
         "code": AchievementCode.COMMUNITY_LEADER.value,
         "name": "Лидер комьюнити",
         "description": "Собрал самую большую компанию в сообществе.",
+        "icon": "👑",
     },
     {
         "code": AchievementCode.IRL.value,
         "name": "В реальной жизни",
         "description": "Посетил какое-либо место всей компанией.",
+        "icon": "📍",
     },
     {
         "code": AchievementCode.GRATITUDE.value,
         "name": "Благодарность",
         "description": "Получил отметку от другого человека за помощь.",
+        "icon": "🙏",
     },
     {
         "code": AchievementCode.SOUL.value,
         "name": "Душа компании",
         "description": "Компания единогласно признала тебя главным звеном.",
+        "icon": "✨",
     },
     # --- Новые достижения (итерация 2): механика без нового UI ---
     {
         "code": AchievementCode.OPEN_HEART.value,
         "name": "Открытое сердце",
         "description": "Открыл сердце навстречу новым людям.",
+        "icon": "💖",
     },
     {
         "code": AchievementCode.POPULAR.value,
         "name": "Популярный",
         "description": "Тебя заметили — сразу 10 человек проявили интерес.",
+        "icon": "🌟",
     },
     {
         "code": AchievementCode.CHOOSY.value,
         "name": "Разборчивый",
         "description": "Стандарты высоки — 20 анкет подряд не прошли отбор.",
+        "icon": "🎯",
     },
     {
         "code": AchievementCode.RECRUITER.value,
         "name": "Вербовщик",
         "description": "Твоё приглашение приняли — ты пополнил компанию.",
+        "icon": "📣",
     },
     {
         "code": AchievementCode.DIPLOMAT.value,
         "name": "Дипломат",
         "description": "Объединил две компании в одну.",
+        "icon": "🕊️",
     },
     {
         "code": AchievementCode.MULTI_CREW.value,
         "name": "Свой везде",
         "description": "В двух компаниях сразу — везде свой.",
+        "icon": "🧭",
     },
     {
         "code": AchievementCode.UNANIMOUS.value,
         "name": "Единогласие",
         "description": "Все до одного проголосовали «за» — тебя ждали.",
+        "icon": "🎉",
     },
     {
         "code": AchievementCode.FAIR_JUDGE.value,
         "name": "Справедливый",
         "description": "Не пропустил ни одного голосования из 10 — это ответственность.",
+        "icon": "⚖️",
     },
     {
         "code": AchievementCode.FAST_FRIENDS.value,
         "name": "Быстрый старт",
         "description": "Первое знакомство — уже в первые сутки. Отличный старт.",
+        "icon": "⚡",
     },
     {
         "code": AchievementCode.EARLY_BIRD.value,
         "name": "Ранняя пташка",
         "description": "Один из первых. Был здесь, когда всё только начиналось.",
+        "icon": "🐣",
     },
     # --- Новые достижения (итерация 2): требуют отдельной механики ---
     {
         "code": AchievementCode.VETERAN.value,
         "name": "Ветеран",
         "description": "30 дней в одной компании — это уже не случайность.",
+        "icon": "🎖️",
     },
     {
         "code": AchievementCode.FIRST_IRL.value,
         "name": "Первый шаг",
         "description": "Первый раз встретились вживую — это уже настоящая компания.",
+        "icon": "👣",
     },
     {
         "code": AchievementCode.CITY_EXPLORER.value,
         "name": "Исследователь",
         "description": "Стал проводником для своей компании — трижды поделился идеями.",
+        "icon": "🗺️",
     },
 ]
 
 
 async def seed_achievements() -> None:
-    """Вставить отсутствующие достижения. Существующие не трогаем."""
+    """
+    Вставить отсутствующие достижения и обновить иконки существующих.
+
+    Идемпотентно: повторный запуск не плодит дублей. Иконки переписываются
+    при каждом запуске — это намеренно, чтобы централизованно править
+    визуальное представление, не делая отдельную миграцию.
+    """
     async with async_session_factory() as session:
-        # Какие коды уже есть в БД.
-        existing = await session.execute(select(Achievement.code))
-        existing_codes = set(existing.scalars().all())
+        # Какие записи уже есть (нужны id и текущая иконка, чтобы решить,
+        # вставить или подравнять иконку).
+        existing_rows = (
+            await session.execute(select(Achievement))
+        ).scalars().all()
+        existing_by_code = {a.code: a for a in existing_rows}
 
-        # Добавляем только те, которых ещё нет (идемпотентность по code).
-        to_add = [
-            Achievement(
-                code=item["code"],
-                name=item["name"],
-                description=item["description"],
-            )
-            for item in ACHIEVEMENTS
-            if item["code"] not in existing_codes
-        ]
+        added = 0
+        updated = 0
+        for item in ACHIEVEMENTS:
+            row = existing_by_code.get(item["code"])
+            if row is None:
+                session.add(
+                    Achievement(
+                        code=item["code"],
+                        name=item["name"],
+                        description=item["description"],
+                        icon=item["icon"],
+                    )
+                )
+                added += 1
+            elif row.icon != item["icon"]:
+                # Синхронизируем иконку с актуальным дизайном.
+                row.icon = item["icon"]
+                updated += 1
 
-        if not to_add:
-            print("Достижения уже наполнены — добавлять нечего.")
-            return
-
-        session.add_all(to_add)
         await session.commit()
-        print(f"Добавлено достижений: {len(to_add)}")
-        for achievement in to_add:
-            print(f"  + {achievement.code}: {achievement.name}")
+        if added == 0 and updated == 0:
+            print("Достижения уже наполнены — менять нечего.")
+            return
+        if added:
+            print(f"Добавлено достижений: {added}")
+        if updated:
+            print(f"Обновлено иконок: {updated}")
 
 
 if __name__ == "__main__":

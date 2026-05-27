@@ -27,6 +27,12 @@ class Achievement(Base):
     code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    # Эмодзи-иконка для UI (показывается в чужой анкете и в витрине).
+    # Короткая строка (эмодзи занимает 1–4 кодовые точки). NOT NULL с
+    # дефолтом ⭐: исторические записи не теряют визуальное представление.
+    icon: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="⭐"
+    )
 
 
 class UserAchievement(Base):

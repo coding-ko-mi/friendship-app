@@ -59,12 +59,8 @@ export function AchievementsScreen() {
 }
 
 function AchievementRow({ card }: { card: AchievementCard }) {
-  // Эмодзи-иконку берём из первого символа name (на MVP отдельного поля
-  // в API нет; названия достижений на бэке оформлены так, что первый символ
-  // — эмодзи или буква, оба варианта смотрятся уместно в круглой плашке).
-  const icon = card.name.codePointAt(0)
-    ? String.fromCodePoint(card.name.codePointAt(0)!)
-    : '★';
+  // Иконка приходит явным полем с бэкенда (поле icon).
+  const icon = card.icon || '★';
 
   return (
     <div

@@ -17,11 +17,19 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { interestsApi, profileApi } from '../api/endpoints';
-import { ApiError } from '../api/client';
+import { ApiError, clearTokens } from '../api/client';
 import { Spinner, ErrorView } from '../components/StatusViews';
 import type { Interest, ProfileOwnResponse } from '../types/api';
 
-export function ProfileScreen() {
+interface ProfileScreenProps {
+  /**
+   * Колбэк после удаления аккаунта. App.tsx сбрасывает роутер на онбординг.
+   * Опционален, чтобы экран оставался самостоятельным (тесты/превью).
+   */
+  onAccountDeleted?: () => void;
+}
+
+export function ProfileScreen({ onAccountDeleted }: ProfileScreenProps = {}) {
   const [profile, setProfile] = useState<ProfileOwnResponse | null>(null);
   const [allInterests, setAllInterests] = useState<Interest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +43,9 @@ export function ProfileScreen() {
   // --- UI-состояния ---
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // Модалка подтверждения удаления аккаунта.
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Загрузка профиля + справочника интересов.
   const load = useCallback(async () => {
@@ -111,6 +122,19 @@ export function ProfileScreen() {
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleDeleteAccount(): Promise<void> {
+    setDeleting(true);
+    try {
+      await profileApi.deleteMine();
+      clearTokens();
+      onAccountDeleted?.();
+    } catch (e: unknown) {
+      showToast(e instanceof ApiError ? e.message : 'Не удалось удалить аккаунт.');
+      setDeleting(false);
+      setShowDeleteConfirm(false);
     }
   }
 
@@ -209,6 +233,100 @@ export function ProfileScreen() {
       >
         {saving ? 'Сохраняем…' : 'Сохранить'}
       </button>
+
+      {/* --- Удаление аккаунта (визуально отделено сверху линией) --- */}
+      <div
+        style={{
+          marginTop: 16,
+          paddingTop: 16,
+          borderTop: '1px solid var(--app-secondary-bg)',
+        }}
+      >
+        <button
+          onClick={() => setShowDeleteConfirm(true)}
+          style={{
+            width: '100%',
+            appearance: 'none',
+            border: 'none',
+            borderRadius: 'var(--app-radius)',
+            padding: '14px 20px',
+            fontSize: 16,
+            fontWeight: 600,
+            background: 'transparent',
+            color: '#e53935',
+            cursor: 'pointer',
+          }}
+        >
+          Удалить аккаунт
+        </button>
+      </div>
+
+      {/* --- Модалка подтверждения удаления --- */}
+      {showDeleteConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+            zIndex: 30,
+          }}
+          onClick={() => !deleting && setShowDeleteConfirm(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'var(--app-bg)',
+              borderRadius: 'var(--app-radius)',
+              padding: 20,
+              maxWidth: 360,
+              width: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+            }}
+          >
+            <h2 style={{ margin: 0, fontSize: 18 }}>Удалить аккаунт?</h2>
+            <p className="app-hint" style={{ margin: 0 }}>
+              Это действие необратимо. Все ваши матчи и данные будут удалены.
+            </p>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                className="app-button app-button--secondary"
+                style={{ flex: 1 }}
+                disabled={deleting}
+                onClick={() => setShowDeleteConfirm(false)}
+              >
+                Отмена
+              </button>
+              <button
+                disabled={deleting}
+                onClick={() => void handleDeleteAccount()}
+                style={{
+                  flex: 1,
+                  appearance: 'none',
+                  border: 'none',
+                  borderRadius: 'var(--app-radius)',
+                  padding: '14px 20px',
+                  fontSize: 16,
+                  fontWeight: 600,
+                  background: '#e53935',
+                  color: '#fff',
+                  cursor: deleting ? 'default' : 'pointer',
+                  opacity: deleting ? 0.6 : 1,
+                }}
+              >
+                {deleting ? 'Удаляем…' : 'Удалить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* --- Тостовое сообщение --- */}
       {toast && (

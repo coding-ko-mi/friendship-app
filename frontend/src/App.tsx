@@ -156,7 +156,11 @@ function ScreenSwitch({
     case 'achievements':
       return <AchievementsScreen />;
     case 'profile':
-      return <ProfileScreen />;
+      return (
+        <ProfileScreen
+          onAccountDeleted={() => router.reset('onboarding')}
+        />
+      );
     case 'group':
       return (
         <GroupScreen

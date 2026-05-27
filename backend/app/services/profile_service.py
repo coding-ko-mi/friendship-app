@@ -9,12 +9,15 @@ ProfileService — работа с профилями.
 Profile-поля — через Mini App (FastAPI).
 """
 
-from sqlalchemy import delete, insert, select
+from redis.asyncio import Redis
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.group import Group, GroupMember
 from app.models.interest import Interest, user_interests
 from app.models.profile import Profile
 from app.models.user import User
+from app.repositories.achievement_repository import AchievementRepository
 from app.repositories.profile_repository import ProfileRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.profile import (
@@ -23,6 +26,7 @@ from app.schemas.profile import (
     ProfilePublicResponse,
     ProfileUpdateRequest,
 )
+from app.services.achievement_service import AchievementService
 
 
 class ProfileNotFoundError(Exception):
@@ -103,11 +107,77 @@ class ProfileService:
         if profile is None:
             profile = Profile(user_id=user_id)  # виртуальный, без сохранения
 
-        return self._build_public(profile, user)
+        # Заработанные достижения — собираем через тот же сервис, чтобы
+        # логика «что показывать» жила в одном месте.
+        achievement_service = AchievementService(
+            achievement_repo=AchievementRepository(self.db)
+        )
+        achievements = await achievement_service.list_earned_public(user_id)
+
+        return self._build_public(profile, user, achievements)
 
     async def create_for_user(self, user_id: int) -> Profile:
         """Вызывается при первом входе через Mini App."""
         return await self.profile_repo.create(user_id)
+
+    async def delete_account(self, user: User, redis: Redis) -> None:
+        """
+        Полное удаление аккаунта пользователя.
+
+        Что происходит:
+          1. Находим компании, в которых пользователь — единственный участник,
+             и удаляем их (после CASCADE-удаления group_members компания
+             осталась бы «вырожденной» с 0 участников — это мусор).
+          2. Удаляем User. CASCADE снимает: profiles, questionnaires,
+             user_interests, user_achievements, likes, matches, group_members,
+             membership_requests (как subject_user), votes.
+          3. Чистим эфемерные данные пользователя в Redis: skip-набор и
+             счётчики достижений. Скипы, в которых ЭТОТ user_id фигурирует
+             у других пользователей, не трогаем — они истекут сами по TTL,
+             а лента просто не покажет несуществующего человека.
+        """
+        # 1. Компании, где он единственный участник. Подзапрос: для каждой
+        # группы пользователя считаем общее число её участников.
+        member_count_subq = (
+            select(
+                GroupMember.group_id.label("gid"),
+                func.count(GroupMember.user_id).label("cnt"),
+            )
+            .group_by(GroupMember.group_id)
+            .subquery()
+        )
+        solo_groups_stmt = (
+            select(GroupMember.group_id)
+            .join(
+                member_count_subq, member_count_subq.c.gid == GroupMember.group_id
+            )
+            .where(
+                GroupMember.user_id == user.id,
+                member_count_subq.c.cnt == 1,
+            )
+        )
+        solo_group_ids = list(
+            (await self.db.execute(solo_groups_stmt)).scalars().all()
+        )
+        if solo_group_ids:
+            await self.db.execute(
+                delete(Group).where(Group.id.in_(solo_group_ids))
+            )
+
+        # 2. Удаляем самого пользователя. Остальные связи снимет CASCADE.
+        await self.db.execute(delete(User).where(User.id == user.id))
+        await self.db.commit()
+
+        # 3. Чистим эфемерное состояние в Redis. Делаем после commit:
+        # если БД упадёт — Redis-данные не теряем зря.
+        for key in (
+            f"skip:{user.id}",
+            f"ach:likes_given:{user.id}",
+            f"ach:likes_received:{user.id}",
+            f"ach:consecutive_skips:{user.id}",
+            f"ach:votes_cast:{user.id}",
+        ):
+            await redis.delete(key)
 
     # ------------------------------------------------------------------
 
@@ -181,7 +251,12 @@ class ProfileService:
             interests=interests,
         )
 
-    def _build_public(self, profile: Profile, user: User) -> ProfilePublicResponse:
+    def _build_public(
+        self,
+        profile: Profile,
+        user: User,
+        achievements: list | None = None,
+    ) -> ProfilePublicResponse:
         return ProfilePublicResponse(
             user_id=user.id,
             name=user.name,
@@ -192,4 +267,5 @@ class ProfileService:
             display_name=profile.display_name,
             gender=profile.gender,
             extra_photos=profile.get_extra_photos(),
+            achievements=achievements or [],
         )

@@ -12,6 +12,7 @@ ProfileUpdateRequest  — PATCH: только поля из таблицы profi
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.profile import Gender
+from app.schemas.achievements import EarnedAchievement
 
 
 class ProfileInterest(BaseModel):
@@ -126,3 +127,6 @@ class ProfilePublicResponse(BaseModel):
     display_name: str | None
     gender: Gender | None
     extra_photos: list[str]
+    # Заработанные достижения (только полученные, без недостигнутых) —
+    # показываются иконками внизу карточки кандидата.
+    achievements: list[EarnedAchievement] = []

@@ -22,7 +22,11 @@ from __future__ import annotations
 
 from app.models.enums import AchievementCode
 from app.repositories.achievement_repository import AchievementRepository
-from app.schemas.achievements import AchievementCard, AchievementsResponse
+from app.schemas.achievements import (
+    AchievementCard,
+    AchievementsResponse,
+    EarnedAchievement,
+)
 
 
 class AchievementService:
@@ -132,6 +136,7 @@ class AchievementService:
                 code=a.code,
                 name=a.name,
                 description=a.description,
+                icon=a.icon,
                 earned=a.id in earned_at_by_id,
                 earned_at=earned_at_by_id.get(a.id),
             )
@@ -143,3 +148,24 @@ class AchievementService:
             earned_count=len(earned_at_by_id),
             total=len(catalog),
         )
+
+    async def list_earned_public(self, user_id: int) -> list[EarnedAchievement]:
+        """
+        Список заработанных достижений пользователя для публичной анкеты.
+
+        В отличие от витрины (get_showcase), сюда попадают ТОЛЬКО уже
+        полученные — недостигнутые в чужой анкете не показываем, чтобы не
+        раскрывать прогресс. Порядок — как в справочнике (стабильный для UI).
+        """
+        catalog = await self.achievement_repo.list_all()
+        earned_ids = await self.achievement_repo.list_earned_ids(user_id)
+        return [
+            EarnedAchievement(
+                code=a.code,
+                name=a.name,
+                description=a.description,
+                icon=a.icon,
+            )
+            for a in catalog
+            if a.id in earned_ids
+        ]
