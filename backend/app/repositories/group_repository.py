@@ -73,6 +73,29 @@ class GroupRepository:
         result = await self.session.execute(stmt)
         return int(result.scalar_one())
 
+    async def find_shared_group(
+        self, user_id_a: int, user_id_b: int
+    ) -> int | None:
+        """
+        Вернуть group_id, если оба пользователя уже состоят в одной компании,
+        иначе None.
+
+        Защита от дублей: если у пары уже есть общая компания, повторное
+        создание новой по тому же мэтчу запрещено (см. group_service.create_group).
+        Реализовано self-join'ом таблицы group_members: ищем group_id, где
+        есть запись и про A, и про B. Один запрос — без N+1.
+        """
+        gm_a = GroupMember.__table__.alias("gm_a")
+        gm_b = GroupMember.__table__.alias("gm_b")
+        stmt = (
+            select(gm_a.c.group_id)
+            .join(gm_b, gm_a.c.group_id == gm_b.c.group_id)
+            .where(gm_a.c.user_id == user_id_a, gm_b.c.user_id == user_id_b)
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list_groups_of_user(self, user_id: int) -> list[tuple[Group, int]]:
         """
         Все компании, в которых состоит пользователь, + размер каждой.

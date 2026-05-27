@@ -208,6 +208,13 @@ class GroupService:
             match.user_b_id if match.user_a_id == founder.id else match.user_a_id
         )
 
+        # Защита от дублей: если основатель и партнёр уже состоят в одной
+        # компании, повторное создание из того же мэтча запрещено. Иначе
+        # после DELETE /history/{partner} и повторного лайка можно было бы
+        # размножить компании на тех же двух людях (см. handoff).
+        if await self.group_repo.find_shared_group(founder.id, partner_id) is not None:
+            raise ConflictError("Компания с этим человеком уже существует")
+
         # Создаём компанию и добавляем обоих участников.
         group = await self.group_repo.create_group(name=name)
         await self.group_repo.add_member(user_id=founder.id, group_id=group.id)

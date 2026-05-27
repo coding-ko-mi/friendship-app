@@ -89,7 +89,13 @@ export function GroupScreen({ router, params }: GroupScreenProps) {
       const reqs = await groupsApi.listRequests(card.id);
       setRequests(reqs);
     } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.message : 'Не удалось создать компанию.');
+      // 409: бэк уже знает компанию с тем же человеком — показываем
+      // понятное сообщение вместо общей ошибки.
+      if (e instanceof ApiError && e.status === 409) {
+        setError('У вас уже есть компания с этим человеком');
+      } else {
+        setError(e instanceof ApiError ? e.message : 'Не удалось создать компанию.');
+      }
     } finally {
       setLoading(false);
     }
