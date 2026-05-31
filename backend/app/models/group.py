@@ -20,12 +20,18 @@ class Group(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    # ID нативной Telegram-группы (чат компании = обычная Telegram-группа).
-    # nullable: компания может существовать в БД до момента, когда её Telegram-чат
-    # создан/привязан. Заполняется тем ID, который мы получим (см. заметку про
-    # ограничения Bot API — решается в чате «Бот»).
+    # ID Telegram-чата компании. В модели «Чатинг» (вариант Б) это ID общей
+    # Hub-супергруппы — ОДИНАКОВЫЙ для всех компаний, поэтому unique УБРАН.
+    # Связку «компания → её тред» задаёт пара (telegram_chat_id, message_thread_id).
+    # nullable: компания существует в БД до того, как бот создаст ей топик.
     telegram_chat_id: Mapped[int | None] = mapped_column(
-        BigInteger, unique=True, nullable=True
+        BigInteger, nullable=True
+    )
+    # ID топика (forum thread) этой компании внутри Hub-супергруппы.
+    # Бот заполняет его после createForumTopic. Сообщения компании шлются с
+    # message_thread_id=<это значение>. nullable по той же причине, что выше.
+    message_thread_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
     )
 
     # Участники компании. delete-orphan: при удалении компании её членства тоже удаляются.

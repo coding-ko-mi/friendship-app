@@ -109,3 +109,24 @@ async def notify_achievement(
         text=texts.NOTIFY_ACHIEVEMENT.format(name=achievement_name),
         markup=keyboards.open_app_keyboard(register=False),
     )
+
+
+async def notify_chat_invite(
+    bot: Bot, *, user_id: int, group_name: str, invite_link: str
+) -> bool:
+    """
+    Пуш с приглашением в чат компании: текст + кнопка-ссылка «Войти в чат».
+
+    invite_link — одноразовая ссылка в Hub (выпускает chat_manager). Кладём её
+    в URL-кнопку: нажатие открывает Telegram-чат и добавляет человека.
+
+    Импорт keyboards внутри — единый стиль с notify_match (избегаем цикла на старте).
+    """
+    from app.bot import keyboards
+
+    return await _safe_send(
+        bot,
+        user_id=user_id,
+        text=texts.NOTIFY_CHAT_INVITE.format(group_name=group_name),
+        markup=keyboards.chat_invite_keyboard(invite_link),
+    )

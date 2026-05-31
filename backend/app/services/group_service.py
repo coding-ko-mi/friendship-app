@@ -38,7 +38,14 @@ from app.schemas.groups import (
     VoteResult,
 )
 from app.services.achievement_service import AchievementService
-from app.services.events import achievement_event, enqueue_event, vote_result_event
+from app.services.events import (
+    achievement_event,
+    chat_add_member_event,
+    chat_create_topic_event,
+    chat_post_message_event,
+    enqueue_event,
+    vote_result_event,
+)
 
 
 # Человекочитаемые имена достижений для пушей (см. комментарий в matching_service).
@@ -240,6 +247,18 @@ class GroupService:
         # Пуши — после фиксации. Падение пуша не должно влиять на уже созданную
         # компанию, поэтому отправка идёт после commit и изолирована.
         await self._push_achievements(pending)
+
+        # --- Чатинг: поручить боту создать топик компании и позвать участников.
+        # Шлём ПОСЛЕ commit — топик создаётся только для реально существующей
+        # компании (контракт events: в очередь идёт лишь зафиксированное).
+        await enqueue_event(
+            self.redis,
+            chat_create_topic_event(
+                group_id=group.id,
+                group_name=name,
+                user_ids=[founder.id, partner_id],
+            ),
+        )
 
         return await self.get_group_card(group.id)
 
@@ -490,6 +509,19 @@ class GroupService:
         # --- Пуши после commit (контракт events: только зафиксированное) ---
         await self._push_achievements(achievement_pushes)
         await self._push_vote_result(request, result)
+        # Чатинг: пригласить нового участника в Hub (только для join/invite).
+        await self._push_chat_membership(request, result)
+        # Чатинг: если только что собрался полный состав — поздравить топик
+        # компании одним системным сообщением (один пост на компанию, а не на
+        # каждого новичка, у кого FULL_HOUSE выдан впервые).
+        if any(name == "Полный состав" for _, name in achievement_pushes):
+            await enqueue_event(
+                self.redis,
+                chat_post_message_event(
+                    group_id=request.target_group_id,
+                    text="🏆 Полный состав собран! Поздравляем — теперь вы команда.",
+                ),
+            )
 
         # FAIR_JUDGE — счётчик голосований голосующего. Считаем здесь, после
         # commit основного состояния: даже если выдача FAIR_JUDGE упадёт, голос
@@ -610,6 +642,36 @@ class GroupService:
                 user_id=request.subject_user_id,
                 group_name=group_name,
                 accepted=result.status is RequestStatus.ACCEPTED,
+            ),
+        )
+
+    async def _push_chat_membership(self, request, result: VoteResult) -> None:
+        """
+        Пригласить в чат компании нового участника после принятой заявки.
+
+        Только для join/invite и только при ACCEPTED: именно тогда в target-компанию
+        добавляется ОДИН новый человек (result.added_user_id). Для merge не шлём:
+        составы сливаются, отдельного «нового участника» нет, а топик target уже
+        существует у всех его членов — отдельное приглашение не требуется на MVP.
+        """
+        if not result.finalized:
+            return
+        if result.status is not RequestStatus.ACCEPTED:
+            return
+        if request.type is RequestType.MERGE:
+            return
+        if result.added_user_id is None:
+            return
+
+        group = await self.group_repo.get_group(request.target_group_id)
+        group_name = group.name if group is not None else ""
+
+        await enqueue_event(
+            self.redis,
+            chat_add_member_event(
+                group_id=request.target_group_id,
+                group_name=group_name,
+                user_id=result.added_user_id,
             ),
         )
 

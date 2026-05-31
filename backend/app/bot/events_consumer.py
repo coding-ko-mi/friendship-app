@@ -20,7 +20,7 @@ import logging
 from aiogram import Bot
 from redis.asyncio import Redis
 
-from app.bot.services import notifications
+from app.bot.services import chat_manager, notifications
 from app.config import EVENTS_QUEUE_KEY
 from app.services.events import EventType
 
@@ -49,6 +49,29 @@ async def _dispatch(bot: Bot, event: dict) -> None:
             bot,
             user_id=event["user_id"],
             achievement_name=event["achievement_name"],
+        )
+    elif event_type == EventType.CHAT_CREATE_TOPIC.value:
+        # Новая компания: создать топик в Hub и позвать участников.
+        await chat_manager.create_topic_for_group(
+            bot,
+            group_id=event["group_id"],
+            group_name=event["group_name"],
+            user_ids=event["user_ids"],
+        )
+    elif event_type == EventType.CHAT_ADD_MEMBER.value:
+        # Принят новый участник: выдать ему invite-ссылку в уже существующий Hub.
+        await chat_manager.invite_user_to_chat(
+            bot,
+            user_id=event["user_id"],
+            group_id=event["group_id"],
+            group_name=event["group_name"],
+        )
+    elif event_type == EventType.CHAT_POST_MESSAGE.value:
+        # Системное сообщение в топик компании (поздравления, подборки).
+        await chat_manager.post_to_group_topic(
+            bot,
+            group_id=event["group_id"],
+            text=event["text"],
         )
     else:
         # Неизвестный тип — логируем и игнорируем (не роняем consumer).

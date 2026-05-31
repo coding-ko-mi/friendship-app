@@ -29,3 +29,20 @@ def open_app_keyboard(*, register: bool) -> InlineKeyboardMarkup:
         web_app=WebAppInfo(url=MINI_APP_URL),
     )
     return InlineKeyboardMarkup(inline_keyboard=[[button]])
+
+
+def chat_invite_keyboard(invite_link: str) -> InlineKeyboardMarkup:
+    """
+    Клавиатура с одной кнопкой-ссылкой «Войти в чат компании».
+
+    invite_link — одноразовая ссылка-приглашение в Hub-супергруппу
+    (её выпускает chat_manager). Нажатие открывает чат и добавляет участника.
+
+    Это URL-кнопка (а не web_app): нам нужно открыть нативный Telegram-чат,
+    а не Mini App. WebAppInfo здесь не подходит.
+    """
+    button = InlineKeyboardButton(
+        text=texts.BTN_OPEN_CHAT,
+        url=invite_link,
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
